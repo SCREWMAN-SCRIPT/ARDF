@@ -1,0 +1,109 @@
+# ARDF Global Configuration
+# ─────────────────────────
+# Edit this file to customise ARDF behaviour.
+# All paths support environment variable expansion: ${HOME}, ${USER}
+
+version: "1.0"
+codename: "NightHawk"
+
+# ── Paths ─────────────────────────────────────────────────────
+paths:
+  sessions_root:  output/sessions
+  reports_root:   output/reports
+  logs_root:      logs
+  wordlists:      config/wordlists.yaml
+  playbooks:      config/playbooks
+
+# ── AI / Local model ──────────────────────────────────────────
+ai:
+  enabled:        true
+  provider:       ollama
+  ollama_base:    http://127.0.0.1:11434
+  # Model priority — first available is used per role
+  models:
+    tactical:
+      - qwen2.5:0.5b
+      - tinyllama:1.1b
+    analysis:
+      - qwen2.5:7b
+      - qwen2.5:0.5b
+      - tinyllama:1.1b
+    planning:
+      - qwen2.5:7b
+      - qwen2.5:0.5b
+      - tinyllama:1.1b
+  timeouts:
+    tactical:  60
+    analysis:  120
+    planning:  120
+  temperature:
+    default:   0.2
+    creative:  0.5
+    strict:    0.1
+
+# ── Execution defaults ────────────────────────────────────────
+execution:
+  max_retries:          2
+  default_timeout_mins: 60
+  parallel_tasks:       2
+  auto_approve:         false
+  non_interactive:      false
+  abort_on_critical:    false
+  gate_timeout_secs:    120
+
+# ── Recon defaults ────────────────────────────────────────────
+recon:
+  default_depth:     passive
+  max_subdomains:    1000
+  max_urls:          5000
+  resolve_ips:       true
+  screenshot_count:  50
+  nuclei_severity:   low,medium,high,critical
+  nuclei_rate:       150
+  nmap_timing:       T4
+  masscan_rate:      1000
+
+# ── Intel ─────────────────────────────────────────────────────
+intel:
+  nvd_rate_delay:    0.7
+  shodan_enabled:    true
+  abuseipdb_enabled: true
+  virustotal_enabled:true
+  max_ips_shodan:    20
+  max_ips_abuseipdb: 30
+  abuse_score_threshold: 50
+
+# ── Reporting ─────────────────────────────────────────────────
+reporting:
+  default_format:      html
+  open_browser:        false
+  include_appendix:    true
+  max_appendix_files:  10
+  max_appendix_size:   4000
+  severity_threshold:  info
+
+# ── Defense / Purple ──────────────────────────────────────────
+defense:
+  generate_sigma:       true
+  generate_hardening:   true
+  generate_remediation: true
+  sigma_status:         experimental
+
+purple:
+  auto_confirm:         false
+  generate_coverage:    true
+  mitre_mapping:        true
+
+# ── Logging ───────────────────────────────────────────────────
+logging:
+  level:    DEBUG
+  console:  true
+  file:     true
+  jsonl:    true
+  quiet:    false
+
+# ── Session ───────────────────────────────────────────────────
+session:
+  keep_last:        20
+  auto_archive:     false
+  compress_outputs: false

@@ -1,0 +1,12 @@
+# ARDF .gitignore
+output/
+logs/
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.egg-info/
+.pytest_cache/
+.DS_Store
+*.zip
+mnt/

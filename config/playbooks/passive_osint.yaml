@@ -1,0 +1,214 @@
+name: passive_osint
+version: "1.0"
+description: "Fully passive OSINT — no active probing, no direct target contact"
+author: ARDF
+mode: red
+
+settings:
+  max_duration_hours: 4
+  confirmation_gates: false
+  save_artifacts: true
+  risk_threshold: 30
+  abort_on_critical: false
+  parallel_tasks: 5
+  stealth: true
+  no_direct_contact: true
+
+target:
+  required_fields:
+    - host
+  optional_fields:
+    - org_name
+    - asn
+    - email_domain
+    - github_org
+    - linkedin_company
+
+phases:
+
+  - id: phase_01
+    name: subdomain_enumeration
+    module: modules.recon
+    function: run_recon
+    depth: passive
+    depends_on: []
+    confirmation: false
+    timeout_minutes: 45
+    on_failure: continue
+    tools:
+      - subfinder
+      - amass
+      - crt_sh
+      - securitytrails
+      - c99
+      - dnsx
+    outputs:
+      - subdomains
+    tags: [recon, passive, subdomains]
+
+  - id: phase_02
+    name: email_harvesting
+    module: modules.recon
+    function: run_recon
+    depth: passive
+    depends_on: [phase_01]
+    confirmation: false
+    timeout_minutes: 30
+    on_failure: continue
+    tools:
+      - theHarvester
+      - whois
+      - holehe
+      - sherlock
+    outputs:
+      - emails
+      - usernames
+      - social_profiles
+    tags: [recon, passive, emails, osint]
+
+  - id: phase_03
+    name: url_and_archive_harvest
+    module: modules.recon
+    function: run_recon
+    depth: passive
+    depends_on: [phase_01]
+    confirmation: false
+    timeout_minutes: 45
+    on_failure: continue
+    tools:
+      - gau
+      - waybackurls
+      - waymore
+    outputs:
+      - historical_urls
+      - archived_endpoints
+    tags: [recon, passive, wayback, urls]
+
+  - id: phase_04
+    name: dns_intelligence
+    module: modules.recon
+    function: run_recon
+    depth: passive
+    depends_on: [phase_01]
+    confirmation: false
+    timeout_minutes: 30
+    on_failure: continue
+    tools:
+      - dnsrecon
+      - dnsenum
+      - fierce
+      - dnstwist
+    outputs:
+      - dns_records
+      - typosquat_domains
+      - mx_records
+    tags: [recon, passive, dns]
+
+  - id: phase_05
+    name: google_dork_osint
+    module: modules.recon
+    function: run_recon
+    depth: passive
+    depends_on: [phase_01]
+    confirmation: false
+    timeout_minutes: 30
+    on_failure: continue
+    tools:
+      - pagodo
+      - gitdorker
+    outputs:
+      - dork_results
+      - exposed_files
+      - git_leaks
+    tags: [recon, passive, dorks, google]
+
+  - id: phase_06
+    name: shodan_censys_lookup
+    module: modules.recon
+    function: run_recon
+    depth: passive
+    depends_on: [phase_01]
+    confirmation: false
+    timeout_minutes: 20
+    on_failure: continue
+    tools:
+      - shodan
+    outputs:
+      - exposed_services
+      - banners
+      - historical_ips
+    tags: [recon, passive, shodan, censys]
+
+  - id: phase_07
+    name: social_and_identity
+    module: modules.recon
+    function: run_recon
+    depth: passive
+    depends_on: [phase_02]
+    confirmation: false
+    timeout_minutes: 30
+    on_failure: continue
+    tools:
+      - socialhunter
+      - linkedin2username
+    inputs:
+      emails: phase_02.emails
+    outputs:
+      - linkedin_users
+      - social_takeover_candidates
+    tags: [recon, passive, social, linkedin]
+
+  - id: phase_08
+    name: intel_enrichment
+    module: modules.intel
+    function: run_intel
+    depends_on:
+      - phase_01
+      - phase_02
+      - phase_03
+      - phase_04
+      - phase_05
+      - phase_06
+      - phase_07
+    confirmation: false
+    timeout_minutes: 30
+    on_failure: continue
+    outputs:
+      - cve_records
+      - abuse_scores
+      - iocs
+      - ai_summary
+    tags: [intel, enrichment, cve]
+
+  - id: phase_09
+    name: report_generation
+    module: modules.report
+    function: generate_report
+    depends_on: [phase_08]
+    confirmation: false
+    timeout_minutes: 10
+    on_failure: abort
+    tags: [report, output]
+
+ai_decisions:
+  enabled: true
+  model: qwen2.5:0.5b
+  fallback_model: tinyllama:1.1b
+  decisions:
+    - on: phase_complete
+      action: summarise_and_plan_next
+    - on: high_value_asset_found
+      action: deepen_osint_on_asset
+    - on: credential_leak_found
+      action: flag_critical_and_expand
+
+reporting:
+  format: html
+  include_sections:
+    - executive_summary
+    - attack_surface
+    - findings
+    - iocs
+    - remediation
+  severity_threshold: info
+  risk_score: true

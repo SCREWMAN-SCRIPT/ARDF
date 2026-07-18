@@ -1,0 +1,316 @@
+name: purple_team
+version: "1.0"
+description: "Simultaneous red and blue — attack and detect in parallel"
+author: ARDF
+mode: purple
+
+settings:
+  max_duration_hours: 8
+  confirmation_gates: true
+  save_artifacts: true
+  risk_threshold: 50
+  abort_on_critical: false
+  parallel_tasks: 4
+  purple_mode: true
+  generate_sigma_rules: true
+  generate_remediation_scripts: true
+  mitre_mapping: true
+
+target:
+  required_fields:
+    - host
+  optional_fields:
+    - url
+    - domain
+    - dc_ip
+    - siem_type
+    - edr_type
+    - log_sources
+
+phases:
+
+  - id: phase_01
+    name: recon_with_detection
+    module: modules.purple.purple_runner
+    function: run_purple_phase
+    depends_on: []
+    confirmation: false
+    timeout_minutes: 90
+    on_failure: continue
+    red_actions:
+      module: modules.recon
+      function: run_recon
+      depth: normal
+    blue_actions:
+      module: modules.defense.monitor
+      function: monitor_recon_activity
+      generate_sigma: true
+      sigma_categories:
+        - network_scan_detection
+        - dns_query_spike
+        - subdomain_enum_detection
+    outputs:
+      red:
+        - subdomains
+        - live_urls
+        - open_ports
+        - technologies
+      blue:
+        - sigma_rules
+        - detection_gaps
+        - log_sources_needed
+    tags: [purple, recon, detection, sigma]
+
+  - id: phase_02
+    name: web_attack_with_detection
+    module: modules.purple.purple_runner
+    function: run_purple_phase
+    depends_on: [phase_01]
+    confirmation: true
+    confirmation_message: "Purple web phase will run attacks AND generate detections. Confirm?"
+    timeout_minutes: 180
+    on_failure: continue
+    red_actions:
+      module: modules.exploit
+      function: run_exploit
+      exploit_mode: web
+      inputs:
+        target_urls: phase_01.red.live_urls
+    blue_actions:
+      module: modules.defense.monitor
+      function: monitor_web_attacks
+      generate_sigma: true
+      sigma_categories:
+        - sqli_detection
+        - xss_detection
+        - lfi_detection
+        - rce_detection
+        - ssrf_detection
+        - auth_bypass_detection
+        - waf_evasion_detection
+    outputs:
+      red:
+        - confirmed_sqli
+        - confirmed_xss
+        - confirmed_rce
+        - credentials
+      blue:
+        - sigma_rules
+        - waf_rules
+        - ids_signatures
+        - detection_coverage_pct
+    mitre_mapping:
+      - T1190
+      - T1059
+      - T1110
+      - T1078
+    tags: [purple, exploit, web, detection, sigma]
+
+  - id: phase_03
+    name: network_attack_with_detection
+    module: modules.purple.purple_runner
+    function: run_purple_phase
+    depends_on: [phase_01]
+    confirmation: true
+    confirmation_message: "Purple network phase ready. Confirm?"
+    timeout_minutes: 120
+    on_failure: continue
+    red_actions:
+      module: modules.exploit
+      function: run_exploit
+      exploit_mode: network
+    blue_actions:
+      module: modules.defense.monitor
+      function: monitor_network_attacks
+      generate_sigma: true
+      sigma_categories:
+        - smb_enumeration_detection
+        - snmp_sweep_detection
+        - ssl_weak_cipher_detection
+        - rdp_attack_detection
+        - lateral_movement_detection
+    outputs:
+      red:
+        - smb_findings
+        - ssl_findings
+        - snmp_findings
+      blue:
+        - sigma_rules
+        - firewall_rules
+        - detection_coverage_pct
+    mitre_mapping:
+      - T1021
+      - T1046
+      - T1135
+      - T1557
+    tags: [purple, exploit, network, detection]
+
+  - id: phase_04
+    name: credential_attack_with_detection
+    module: modules.purple.purple_runner
+    function: run_purple_phase
+    depends_on: [phase_02, phase_03]
+    confirmation: true
+    confirmation_message: "Purple credential phase will run brute-force attacks. Confirm?"
+    timeout_minutes: 120
+    on_failure: continue
+    red_actions:
+      module: modules.exploit
+      function: run_exploit
+      exploit_mode: password
+    blue_actions:
+      module: modules.defense.monitor
+      function: monitor_credential_attacks
+      generate_sigma: true
+      sigma_categories:
+        - brute_force_detection
+        - password_spray_detection
+        - kerberoast_detection
+        - asrep_roast_detection
+        - credential_dumping_detection
+    outputs:
+      red:
+        - cracked_credentials
+        - valid_accounts
+      blue:
+        - sigma_rules
+        - account_lockout_policy_gaps
+        - detection_coverage_pct
+    mitre_mapping:
+      - T1110
+      - T1558
+      - T1003
+    tags: [purple, credentials, detection, kerberos]
+
+  - id: phase_05
+    name: post_exploit_with_detection
+    module: modules.purple.purple_runner
+    function: run_purple_phase
+    depends_on: [phase_04]
+    confirmation: true
+    confirmation_message: "Post-exploitation simulation with blue team detection. Confirm?"
+    timeout_minutes: 120
+    on_failure: continue
+    condition: "phase_04.red.valid_accounts != []"
+    red_actions:
+      module: modules.exploit
+      function: run_exploit
+      exploit_mode: post
+    blue_actions:
+      module: modules.defense.monitor
+      function: monitor_post_exploitation
+      generate_sigma: true
+      sigma_categories:
+        - privilege_escalation_detection
+        - persistence_detection
+        - lateral_movement_detection
+        - exfil_detection
+        - c2_detection
+    outputs:
+      red:
+        - privesc_findings
+        - persistence_mechanisms
+      blue:
+        - sigma_rules
+        - edr_rules
+        - detection_coverage_pct
+    mitre_mapping:
+      - T1548
+      - T1053
+      - T1071
+      - T1041
+    tags: [purple, post-exploit, detection, persistence]
+
+  - id: phase_06
+    name: hardening_generation
+    module: modules.defense.hardening
+    function: generate_hardening_report
+    depends_on:
+      - phase_01
+      - phase_02
+      - phase_03
+      - phase_04
+      - phase_05
+    confirmation: false
+    timeout_minutes: 20
+    on_failure: continue
+    outputs:
+      - hardening_scripts
+      - config_recommendations
+      - patch_list
+    tags: [blue, hardening, remediation]
+
+  - id: phase_07
+    name: coverage_mapping
+    module: modules.purple.coverage_mapper
+    function: map_coverage
+    depends_on:
+      - phase_01
+      - phase_02
+      - phase_03
+      - phase_04
+      - phase_05
+    confirmation: false
+    timeout_minutes: 10
+    on_failure: continue
+    outputs:
+      - mitre_coverage_map
+      - detection_gaps
+      - coverage_percentage
+    tags: [purple, mitre, coverage, gaps]
+
+  - id: phase_08
+    name: intel_enrichment
+    module: modules.intel
+    function: run_intel
+    depends_on: [phase_07]
+    confirmation: false
+    timeout_minutes: 20
+    on_failure: continue
+    tags: [intel, enrichment]
+
+  - id: phase_09
+    name: report_generation
+    module: modules.report
+    function: generate_report
+    depends_on: [phase_07, phase_08]
+    confirmation: false
+    timeout_minutes: 10
+    on_failure: abort
+    settings:
+      purple_mode: true
+      include_sigma_rules: true
+      include_mitre_map: true
+      include_coverage_chart: true
+    tags: [report, output, purple]
+
+ai_decisions:
+  enabled: true
+  model: qwen2.5:0.5b
+  fallback_model: tinyllama:1.1b
+  decisions:
+    - on: tool_failure
+      action: select_alternate_tactic
+    - on: detection_gap_found
+      action: generate_detection_rule
+    - on: new_critical_finding
+      action: generate_sigma_and_remediation
+    - on: phase_complete
+      action: calculate_coverage_delta
+    - on: attack_succeeded
+      action: generate_blue_countermeasure
+
+reporting:
+  format: html
+  purple_sections:
+    - executive_summary
+    - red_findings
+    - blue_detections
+    - coverage_map
+    - sigma_rules
+    - mitre_heatmap
+    - remediation_plan
+    - hardening_scripts
+  severity_threshold: info
+  risk_score: true
+  coverage_score: true

@@ -1,0 +1,208 @@
+version: "1.0"
+description: "ARDF wordlist registry — all tool wordlist paths resolved from here"
+
+# ─────────────────────────────────────────────
+# Resolution order:
+#   1. custom path (absolute)
+#   2. seclists path
+#   3. kali default path
+#   4. fallback (bundled minimal list)
+# ─────────────────────────────────────────────
+
+base_paths:
+  seclists:      /usr/share/seclists
+  wordlists:     /usr/share/wordlists
+  dirb:          /usr/share/wordlists/dirb
+  dirbuster:     /usr/share/wordlists/dirbuster
+  rockyou:       /usr/share/wordlists/rockyou.txt
+  bundled:       /opt/ardf/wordlists
+
+# ─────────────────────────────────────────────
+# DNS / Subdomain enumeration
+# ─────────────────────────────────────────────
+
+dns:
+  subdomains_small:
+    primary:   /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt
+    fallback:  /usr/share/seclists/Discovery/DNS/bitquark-subdomains-top100000.txt
+    bundled:   /opt/ardf/wordlists/dns/subdomains-small.txt
+
+  subdomains_medium:
+    primary:   /usr/share/seclists/Discovery/DNS/subdomains-top1million-20000.txt
+    fallback:  /usr/share/seclists/Discovery/DNS/dns-Jhaddix.txt
+    bundled:   /opt/ardf/wordlists/dns/subdomains-medium.txt
+
+  subdomains_large:
+    primary:   /usr/share/seclists/Discovery/DNS/subdomains-top1million-110000.txt
+    fallback:  /usr/share/wordlists/dnsmap.txt
+    bundled:   /opt/ardf/wordlists/dns/subdomains-large.txt
+
+  resolvers:
+    primary:   /usr/share/seclists/Miscellaneous/dns-resolvers.txt
+    fallback:  /etc/resolv.conf
+    bundled:   /opt/ardf/wordlists/dns/resolvers.txt
+
+  permutations:
+    primary:   /usr/share/seclists/Discovery/DNS/deepmagic.com-prefixes-top500.txt
+    bundled:   /opt/ardf/wordlists/dns/permutations.txt
+
+# ─────────────────────────────────────────────
+# Web content discovery
+# ─────────────────────────────────────────────
+
+web:
+  directories_small:
+    primary:   /usr/share/wordlists/dirb/common.txt
+    fallback:  /usr/share/seclists/Discovery/Web-Content/common.txt
+    bundled:   /opt/ardf/wordlists/web/common.txt
+
+  directories_medium:
+    primary:   /usr/share/wordlists/dirb/big.txt
+    fallback:  /usr/share/seclists/Discovery/Web-Content/directory-list-2.3-medium.txt
+    bundled:   /opt/ardf/wordlists/web/medium.txt
+
+  directories_large:
+    primary:   /usr/share/dirbuster/wordlists/directory-list-2.3-big.txt
+    fallback:  /usr/share/seclists/Discovery/Web-Content/directory-list-2.3-big.txt
+    bundled:   /opt/ardf/wordlists/web/big.txt
+
+  api_endpoints:
+    primary:   /usr/share/seclists/Discovery/Web-Content/api/api-endpoints.txt
+    fallback:  /usr/share/seclists/Discovery/Web-Content/swagger.txt
+    bundled:   /opt/ardf/wordlists/web/api-endpoints.txt
+
+  parameters:
+    primary:   /usr/share/seclists/Discovery/Web-Content/burp-parameter-names.txt
+    fallback:  /usr/share/seclists/Discovery/Web-Content/raft-large-parameters.txt
+    bundled:   /opt/ardf/wordlists/web/parameters.txt
+
+  extensions:
+    primary:   /usr/share/seclists/Discovery/Web-Content/web-extensions.txt
+    bundled:   /opt/ardf/wordlists/web/extensions.txt
+
+  backups:
+    primary:   /usr/share/seclists/Discovery/Web-Content/backup-files.txt
+    bundled:   /opt/ardf/wordlists/web/backups.txt
+
+  tech_specific:
+    wordpress:
+      primary: /usr/share/seclists/Discovery/Web-Content/CMS/wordpress.txt
+      bundled: /opt/ardf/wordlists/web/cms/wordpress.txt
+    drupal:
+      primary: /usr/share/seclists/Discovery/Web-Content/CMS/drupal.txt
+      bundled: /opt/ardf/wordlists/web/cms/drupal.txt
+    joomla:
+      primary: /usr/share/seclists/Discovery/Web-Content/CMS/joomla.txt
+      bundled: /opt/ardf/wordlists/web/cms/joomla.txt
+    tomcat:
+      primary: /usr/share/seclists/Discovery/Web-Content/tomcat.txt
+      bundled: /opt/ardf/wordlists/web/cms/tomcat.txt
+
+# ─────────────────────────────────────────────
+# Credentials & passwords
+# ─────────────────────────────────────────────
+
+passwords:
+  rockyou:
+    primary:   /usr/share/wordlists/rockyou.txt
+    bundled:   /opt/ardf/wordlists/passwords/rockyou-top10000.txt
+
+  common:
+    primary:   /usr/share/seclists/Passwords/Common-Credentials/10-million-password-list-top-10000.txt
+    fallback:  /usr/share/seclists/Passwords/darkweb2017-top10000.txt
+    bundled:   /opt/ardf/wordlists/passwords/common.txt
+
+  web_defaults:
+    primary:   /usr/share/seclists/Passwords/Default-Credentials/default-passwords.txt
+    bundled:   /opt/ardf/wordlists/passwords/defaults.txt
+
+  service_defaults:
+    primary:   /usr/share/seclists/Passwords/Default-Credentials/default-passwords.csv
+    bundled:   /opt/ardf/wordlists/passwords/service-defaults.txt
+
+  hashcat_rules:
+    best64:    /usr/share/hashcat/rules/best64.rule
+    rockyou30: /usr/share/hashcat/rules/rockyou-30000.rule
+    dive:      /usr/share/hashcat/rules/dive.rule
+    bundled:   /opt/ardf/wordlists/passwords/rules/best64.rule
+
+# ─────────────────────────────────────────────
+# Usernames
+# ─────────────────────────────────────────────
+
+usernames:
+  short:
+    primary:   /usr/share/seclists/Usernames/top-usernames-shortlist.txt
+    bundled:   /opt/ardf/wordlists/usernames/short.txt
+
+  medium:
+    primary:   /usr/share/seclists/Usernames/Names/names.txt
+    bundled:   /opt/ardf/wordlists/usernames/medium.txt
+
+  unix:
+    primary:   /usr/share/seclists/Usernames/unix-users.txt
+    bundled:   /opt/ardf/wordlists/usernames/unix.txt
+
+  windows:
+    primary:   /usr/share/seclists/Usernames/windows-active-directory-usernames.txt
+    bundled:   /opt/ardf/wordlists/usernames/windows-ad.txt
+
+# ─────────────────────────────────────────────
+# Fuzzing payloads
+# ─────────────────────────────────────────────
+
+fuzzing:
+  sqli:
+    primary:   /usr/share/seclists/Fuzzing/SQLi/Generic-SQLi.txt
+    bundled:   /opt/ardf/wordlists/fuzzing/sqli.txt
+
+  xss:
+    primary:   /usr/share/seclists/Fuzzing/XSS/XSS-Jhaddix.txt
+    fallback:  /usr/share/seclists/Fuzzing/XSS/XSS-BruteLogic.txt
+    bundled:   /opt/ardf/wordlists/fuzzing/xss.txt
+
+  lfi:
+    primary:   /usr/share/seclists/Fuzzing/LFI/LFI-Jhaddix.txt
+    fallback:  /usr/share/seclists/Fuzzing/LFI/LFI-gracefulsecurity-linux.txt
+    bundled:   /opt/ardf/wordlists/fuzzing/lfi.txt
+
+  ssrf:
+    primary:   /usr/share/seclists/Fuzzing/SSRF/SSRF-params.txt
+    bundled:   /opt/ardf/wordlists/fuzzing/ssrf.txt
+
+  ssti:
+    primary:   /usr/share/seclists/Fuzzing/template-engines-expression.txt
+    bundled:   /opt/ardf/wordlists/fuzzing/ssti.txt
+
+  xxe:
+    primary:   /usr/share/seclists/Fuzzing/XXE-Fuzzing.txt
+    bundled:   /opt/ardf/wordlists/fuzzing/xxe.txt
+
+  command_injection:
+    primary:   /usr/share/seclists/Fuzzing/command-injection-commix.txt
+    bundled:   /opt/ardf/wordlists/fuzzing/cmdi.txt
+
+  open_redirect:
+    primary:   /usr/share/seclists/Fuzzing/open-redirect-payloads.txt
+    bundled:   /opt/ardf/wordlists/fuzzing/redirect.txt
+
+# ─────────────────────────────────────────────
+# SNMP
+# ─────────────────────────────────────────────
+
+snmp:
+  communities:
+    primary:   /usr/share/seclists/Miscellaneous/wordlist-common-snmp-community-strings.txt
+    bundled:   /opt/ardf/wordlists/snmp/communities.txt
+
+# ─────────────────────────────────────────────
+# Resolution helper config
+# ─────────────────────────────────────────────
+
+resolution:
+  # If primary and fallback are both missing, use bundled
+  # If bundled is also missing, log warning and skip tool
+  missing_action: warn_and_skip
+  log_missing:    true
+  auto_download:  false
+  download_source: https://github.com/danielmiessler/SecLists

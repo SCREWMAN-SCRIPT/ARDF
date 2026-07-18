@@ -1,0 +1,314 @@
+name: web_audit
+version: "1.0"
+description: "Full web application security audit — recon through exploitation"
+author: ARDF
+mode: red
+
+settings:
+  max_duration_hours: 6
+  confirmation_gates: true
+  save_artifacts: true
+  risk_threshold: 50
+  abort_on_critical: false
+  parallel_tasks: 4
+
+target:
+  required_fields:
+    - host
+    - url
+  optional_fields:
+    - auth_cookie
+    - auth_header
+    - login_url
+    - username
+    - password
+    - scope_urls
+    - exclude_urls
+    - cms
+
+phases:
+
+  - id: phase_01
+    name: web_fingerprinting
+    module: modules.recon
+    function: run_recon
+    depth: normal
+    depends_on: []
+    confirmation: false
+    timeout_minutes: 30
+    on_failure: continue
+    tools:
+      - httpx
+      - whatweb
+      - wappalyzer
+      - wafw00f
+      - cmseek
+      - nikto
+    outputs:
+      - technologies
+      - waf_detected
+      - cms_detected
+      - headers
+      - live_urls
+    tags: [recon, web, fingerprint, waf]
+
+  - id: phase_02
+    name: subdomain_and_vhost
+    module: modules.recon
+    function: run_recon
+    depth: normal
+    depends_on: [phase_01]
+    confirmation: false
+    timeout_minutes: 45
+    on_failure: continue
+    tools:
+      - subfinder
+      - amass
+      - dnsx
+      - httpx
+      - tlsx
+    outputs:
+      - subdomains
+      - vhosts
+      - tls_findings
+    tags: [recon, subdomains, vhost, tls]
+
+  - id: phase_03
+    name: content_discovery
+    module: modules.recon
+    function: run_recon
+    depth: depth
+    depends_on: [phase_01]
+    confirmation: false
+    timeout_minutes: 60
+    on_failure: continue
+    tools:
+      - ffuf
+      - gobuster
+      - hakrawler
+      - gospider
+      - katana
+      - cariddi
+      - photon
+    inputs:
+      live_urls: phase_01.live_urls
+    outputs:
+      - endpoints
+      - directories
+      - files
+      - crawled_urls
+    tags: [recon, fuzzing, crawl, content]
+
+  - id: phase_04
+    name: javascript_analysis
+    module: modules.recon
+    function: run_recon
+    depth: depth
+    depends_on: [phase_03]
+    confirmation: false
+    timeout_minutes: 45
+    on_failure: continue
+    tools:
+      - getJS
+      - linkfinder
+      - secretfinder
+      - xnlinkfinder
+      - trufflehog
+    inputs:
+      crawled_urls: phase_03.crawled_urls
+    outputs:
+      - js_endpoints
+      - js_secrets
+      - api_keys
+    tags: [recon, javascript, secrets, endpoints]
+
+  - id: phase_05
+    name: parameter_discovery
+    module: modules.recon
+    function: run_recon
+    depth: depth
+    depends_on: [phase_03]
+    confirmation: false
+    timeout_minutes: 45
+    on_failure: continue
+    tools:
+      - paramspider
+      - arjun
+      - gf
+    inputs:
+      endpoints: phase_03.endpoints
+      crawled_urls: phase_03.crawled_urls
+    outputs:
+      - parameters
+      - gf_xss_targets
+      - gf_sqli_targets
+      - gf_ssrf_targets
+      - gf_lfi_targets
+      - gf_rce_targets
+      - gf_ssti_targets
+    tags: [recon, parameters, gf, patterns]
+
+  - id: phase_06
+    name: vulnerability_scanning
+    module: modules.recon
+    function: run_recon
+    depth: depth
+    depends_on: [phase_03, phase_04, phase_05]
+    confirmation: false
+    timeout_minutes: 90
+    on_failure: continue
+    tools:
+      - nuclei
+    inputs:
+      live_urls: phase_01.live_urls
+      subdomains: phase_02.subdomains
+    outputs:
+      - nuclei_findings
+      - cve_hits
+      - misconfiguration_hits
+    tags: [recon, nuclei, vuln-scan, cve]
+
+  - id: phase_07
+    name: active_exploitation
+    module: modules.exploit
+    function: run_exploit
+    exploit_mode: web
+    depends_on: [phase_05, phase_06]
+    confirmation: true
+    confirmation_message: "Active exploitation will send attack payloads. Confirm to proceed."
+    timeout_minutes: 180
+    on_failure: continue
+    inputs:
+      target_urls: phase_01.live_urls
+      gf_xss_targets: phase_05.gf_xss_targets
+      gf_sqli_targets: phase_05.gf_sqli_targets
+      gf_ssrf_targets: phase_05.gf_ssrf_targets
+      gf_lfi_targets: phase_05.gf_lfi_targets
+      waf_detected: phase_01.waf_detected
+    tools:
+      - sqlmap
+      - ghauri
+      - dalfox
+      - xsstrike
+      - commix
+      - tplmap
+      - ssrfmap
+      - xxeinjector
+      - lfimap
+      - crlfuzz
+      - smuggler
+      - nosqlmap
+      - jwt_tool
+      - byp4xx
+      - graphw00f
+      - clairvoyance
+    outputs:
+      - confirmed_sqli
+      - confirmed_xss
+      - confirmed_rce
+      - confirmed_ssrf
+      - confirmed_lfi
+      - credentials
+    tags: [exploit, web, sqli, xss, rce, ssrf, lfi]
+
+  - id: phase_08
+    name: authentication_attacks
+    module: modules.exploit
+    function: run_exploit
+    exploit_mode: web
+    depends_on: [phase_07]
+    confirmation: true
+    confirmation_message: "Authentication brute-force will generate login attempts. Confirm?"
+    timeout_minutes: 60
+    on_failure: continue
+    tools:
+      - hydra
+      - wfuzz
+    outputs:
+      - cracked_credentials
+    tags: [exploit, auth, brute-force]
+
+  - id: phase_09
+    name: cms_exploitation
+    module: modules.exploit
+    function: run_exploit
+    exploit_mode: web
+    depends_on: [phase_01, phase_07]
+    confirmation: true
+    confirmation_message: "CMS-specific exploitation ready. Confirm?"
+    timeout_minutes: 60
+    on_failure: continue
+    condition: "phase_01.cms_detected != null"
+    tools:
+      - wpscan
+    outputs:
+      - cms_vulns
+      - cms_credentials
+    tags: [exploit, cms, wordpress]
+
+  - id: phase_10
+    name: intel_enrichment
+    module: modules.intel
+    function: run_intel
+    depends_on: [phase_06, phase_07, phase_08, phase_09]
+    confirmation: false
+    timeout_minutes: 20
+    on_failure: continue
+    tags: [intel, enrichment, cve]
+
+  - id: phase_11
+    name: screenshot_and_evidence
+    module: modules.recon
+    function: run_recon
+    depth: depth
+    depends_on: [phase_07]
+    confirmation: false
+    timeout_minutes: 30
+    on_failure: continue
+    tools:
+      - gowitness
+      - eyewitness
+    inputs:
+      live_urls: phase_01.live_urls
+    tags: [evidence, screenshots]
+
+  - id: phase_12
+    name: report_generation
+    module: modules.report
+    function: generate_report
+    depends_on: [phase_10, phase_11]
+    confirmation: false
+    timeout_minutes: 10
+    on_failure: abort
+    tags: [report, output]
+
+ai_decisions:
+  enabled: true
+  model: qwen2.5:0.5b
+  fallback_model: tinyllama:1.1b
+  decisions:
+    - on: waf_detected
+      action: apply_tamper_bypass
+    - on: tool_failure
+      action: select_alternate_tactic
+    - on: new_critical_finding
+      action: prioritise_exploitation
+    - on: credentials_found
+      action: expand_attack_surface
+    - on: cms_detected
+      action: load_cms_specific_tactics
+    - on: phase_complete
+      action: summarise_and_plan_next
+
+reporting:
+  format: html
+  include_sections:
+    - executive_summary
+    - attack_surface
+    - findings
+    - kill_chain
+    - iocs
+    - remediation
+    - appendix
+  severity_threshold: info
+  risk_score: true

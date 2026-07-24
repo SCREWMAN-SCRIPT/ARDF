@@ -1,0 +1,33 @@
+objective: "Full penetration test of target"
+playbook_mode: "red"
+
+tasks:
+  - id: passive_recon
+    name: "Passive Reconnaissance"
+    module: modules.recon
+    function: run_recon
+    args:
+      depth: passive
+    tags: ["recon", "passive"]
+    confirm: false
+
+  - id: active_scan
+    name: "Active Port Scan"
+    module: modules.active
+    function: run_active
+    args: {}
+    depends_on: ["passive_recon"]
+    tags: ["active", "portscan"]
+    confirm: true
+    confirm_msg: "This will scan ports on the target"
+
+  - id: web_scan
+    name: "Web Application Scan"
+    module: modules.web
+    function: WebScanner.scan
+    args:
+      url: "https://<target>"
+    depends_on: ["active_scan"]
+    tags: ["web", "active"]
+    confirm: true
+    confirm_msg: "This will enumerate web directories and scan for vulnerabilities"

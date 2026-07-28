@@ -2,23 +2,19 @@
 modules/intel.py
 ─────────────────
 Threat Intelligence module for ARDF.
-Enriches findings with CVE data, Shodan, AbuseIPDB, VirusTotal,
-and local Qwen2.5 AI-assisted analysis.
+Enriches findings with CVE data from NVD only.
+(Other intelligence sources moved to separate modules for cleanliness)
 
 Sources
 ───────
   - NVD (NIST) CVE API v2          — no key required
-  - Shodan   (optional API key)
-  - AbuseIPDB (optional API key)
-  - VirusTotal (optional API key)
-  - Qwen2.5:0.5b via ollama        — local, private
+  - Local Qwen2.5:0.5b via ollama — local, private (optional)
 """
 
 import os
 import re
 import json
 import time
-import socket
 import hashlib
 import urllib.request
 import urllib.error
@@ -34,10 +30,6 @@ from modules.session import Session, Finding, SeverityLevel
 # ─────────────────────────────────────────────────────────────
 # API keys — all optional, read from environment
 # ─────────────────────────────────────────────────────────────
-
-SHODAN_API_KEY    = os.environ.get("SHODAN_API_KEY", "")
-ABUSEIPDB_API_KEY = os.environ.get("ABUSEIPDB_API_KEY", "")
-VT_API_KEY        = os.environ.get("VT_API_KEY", "")
 
 OLLAMA_MODEL   = os.environ.get("ARDF_AI_MODEL",   "qwen2.5:0.5b")
 OLLAMA_TIMEOUT = int(os.environ.get("ARDF_AI_TIMEOUT", "60"))
@@ -129,6 +121,17 @@ class CVEClient:
             for v in data.get("vulnerabilities", [])
         ]
 
+    def search_by_version(
+        self,
+        product:   str,
+        version:   str,
+        max_results: int = 10,
+        logger:    Optional[ARDFLogger] = None,
+    ) -> List[Dict[str, Any]]:
+        """Search CVEs for a specific product version."""
+        keyword = f"{product} {version}"
+        return self.search_by_keyword(keyword, max_results, logger)
+
     @staticmethod
     def _normalise(cve: Dict) -> Dict[str, Any]:
         cve_id   = cve.get("id", "")
@@ -162,6 +165,11 @@ class CVEClient:
             "published":   cve.get("published", ""),
             "modified":    cve.get("lastModified", ""),
             "references":  refs,
+            "impact": {
+                "confidentiality": _get_impact(cve, "confidentiality"),
+                "integrity": _get_impact(cve, "integrity"),
+                "availability": _get_impact(cve, "availability"),
+            }
         }
 
 
@@ -173,226 +181,19 @@ def _score_to_severity(score: Optional[float]) -> str:
     return "low"
 
 
-# ─────────────────────────────────────────────────────────────
-# Shodan
-# ─────────────────────────────────────────────────────────────
-
-class ShodanClient:
-    BASE = "https://api.shodan.io"
-
-    def __init__(self, api_key: str = SHODAN_API_KEY):
-        self.api_key = api_key
-
-    def _enabled(self) -> bool:
-        return bool(self.api_key)
-
-    def host(
-        self,
-        ip:     str,
-        logger: Optional[ARDFLogger] = None,
-    ) -> Optional[Dict]:
-        if not self._enabled():
-            return None
-        url  = f"{self.BASE}/shodan/host/{ip}?key={self.api_key}"
-        data = _http_get(url, logger=logger)
-        if not data or "error" in data:
-            return None
-        return {
-            "ip":          ip,
-            "org":         data.get("org", ""),
-            "isp":         data.get("isp", ""),
-            "country":     data.get("country_name", ""),
-            "city":        data.get("city", ""),
-            "os":          data.get("os", ""),
-            "ports":       data.get("ports", []),
-            "hostnames":   data.get("hostnames", []),
-            "tags":        data.get("tags", []),
-            "vulns":       list(data.get("vulns", {}).keys()),
-            "last_update": data.get("last_update", ""),
-        }
-
-    def dns_reverse(
-        self,
-        ip:     str,
-        logger: Optional[ARDFLogger] = None,
-    ) -> List[str]:
-        if not self._enabled():
-            return []
-        url  = f"{self.BASE}/dns/reverse?ips={ip}&key={self.api_key}"
-        data = _http_get(url, logger=logger)
-        return data.get(ip, []) if data else []
-
-    def search(
-        self,
-        query:       str,
-        max_results: int = 20,
-        logger:      Optional[ARDFLogger] = None,
-    ) -> List[Dict]:
-        if not self._enabled():
-            return []
-        params = urllib.parse.urlencode({"query": query, "key": self.api_key})
-        url    = f"{self.BASE}/shodan/host/search?{params}"
-        data   = _http_get(url, logger=logger)
-        if not data:
-            return []
-        return data.get("matches", [])[:max_results]
+def _get_impact(cve: Dict, key: str) -> str:
+    try:
+        metrics = cve.get("metrics", {})
+        for metric_type in ("cvssMetricV31", "cvssMetricV30"):
+            if metric_type in metrics:
+                return metrics[metric_type][0].get("cvssData", {}).get("impact", {}).get(key, "NONE")
+        return "NONE"
+    except Exception:
+        return "NONE"
 
 
 # ─────────────────────────────────────────────────────────────
-# AbuseIPDB
-# ─────────────────────────────────────────────────────────────
-
-class AbuseIPDBClient:
-    BASE = "https://api.abuseipdb.com/api/v2"
-
-    def __init__(self, api_key: str = ABUSEIPDB_API_KEY):
-        self.api_key = api_key
-
-    def _enabled(self) -> bool:
-        return bool(self.api_key)
-
-    def check(
-        self,
-        ip:            str,
-        max_age_days:  int = 30,
-        logger:        Optional[ARDFLogger] = None,
-    ) -> Optional[Dict]:
-        if not self._enabled():
-            return None
-        params = urllib.parse.urlencode({
-            "ipAddress":    ip,
-            "maxAgeInDays": max_age_days,
-        })
-        url  = f"{self.BASE}/check?{params}"
-        data = _http_get(
-            url,
-            headers={"Key": self.api_key, "Accept": "application/json"},
-            logger=logger,
-        )
-        if not data:
-            return None
-        d = data.get("data", {})
-        return {
-            "ip":            ip,
-            "abuse_score":   d.get("abuseConfidenceScore", 0),
-            "country":       d.get("countryCode", ""),
-            "isp":           d.get("isp", ""),
-            "domain":        d.get("domain", ""),
-            "total_reports": d.get("totalReports", 0),
-            "last_reported": d.get("lastReportedAt", ""),
-            "is_tor":        d.get("isTor", False),
-            "is_public":     d.get("isPublic", True),
-        }
-
-    def bulk_check(
-        self,
-        ips:    List[str],
-        logger: Optional[ARDFLogger] = None,
-    ) -> Dict[str, Optional[Dict]]:
-        results = {}
-        for ip in ips:
-            results[ip] = self.check(ip, logger=logger)
-            time.sleep(0.3)
-        return results
-
-
-# ─────────────────────────────────────────────────────────────
-# VirusTotal
-# ─────────────────────────────────────────────────────────────
-
-class VirusTotalClient:
-    BASE = "https://www.virustotal.com/api/v3"
-
-    def __init__(self, api_key: str = VT_API_KEY):
-        self.api_key = api_key
-
-    def _enabled(self) -> bool:
-        return bool(self.api_key)
-
-    def _headers(self) -> Dict[str, str]:
-        return {"x-apikey": self.api_key}
-
-    def check_hash(
-        self,
-        file_hash: str,
-        logger:    Optional[ARDFLogger] = None,
-    ) -> Optional[Dict]:
-        if not self._enabled():
-            return None
-        url   = f"{self.BASE}/files/{file_hash}"
-        data  = _http_get(url, headers=self._headers(), logger=logger)
-        if not data:
-            return None
-        attrs = data.get("data", {}).get("attributes", {})
-        stats = attrs.get("last_analysis_stats", {})
-        return {
-            "hash":       file_hash,
-            "malicious":  stats.get("malicious", 0),
-            "suspicious": stats.get("suspicious", 0),
-            "harmless":   stats.get("harmless", 0),
-            "undetected": stats.get("undetected", 0),
-            "name":       attrs.get("meaningful_name", ""),
-            "type":       attrs.get("type_description", ""),
-        }
-
-    def check_ip(
-        self,
-        ip:     str,
-        logger: Optional[ARDFLogger] = None,
-    ) -> Optional[Dict]:
-        if not self._enabled():
-            return None
-        url   = f"{self.BASE}/ip_addresses/{ip}"
-        data  = _http_get(url, headers=self._headers(), logger=logger)
-        if not data:
-            return None
-        attrs = data.get("data", {}).get("attributes", {})
-        stats = attrs.get("last_analysis_stats", {})
-        return {
-            "ip":         ip,
-            "malicious":  stats.get("malicious", 0),
-            "suspicious": stats.get("suspicious", 0),
-            "country":    attrs.get("country", ""),
-            "owner":      attrs.get("as_owner", ""),
-        }
-
-    def check_url(
-        self,
-        url_to_check: str,
-        logger:       Optional[ARDFLogger] = None,
-    ) -> Optional[Dict]:
-        if not self._enabled():
-            return None
-        url_id = urllib.parse.quote_plus(
-            urllib.parse.quote(url_to_check, safe="")
-        )
-        url   = f"{self.BASE}/urls/{url_id}"
-        data  = _http_get(url, headers=self._headers(), logger=logger)
-        if not data:
-            return None
-        attrs = data.get("data", {}).get("attributes", {})
-        stats = attrs.get("last_analysis_stats", {})
-        return {
-            "url":        url_to_check,
-            "malicious":  stats.get("malicious", 0),
-            "suspicious": stats.get("suspicious", 0),
-            "harmless":   stats.get("harmless", 0),
-        }
-
-    def scan_file(
-        self,
-        filepath: Path,
-        logger:   Optional[ARDFLogger] = None,
-    ) -> Optional[Dict]:
-        sha256 = hashlib.sha256()
-        with open(filepath, "rb") as fh:
-            while chunk := fh.read(8192):
-                sha256.update(chunk)
-        return self.check_hash(sha256.hexdigest(), logger=logger)
-
-
-# ─────────────────────────────────────────────────────────────
-# Qwen2.5 local AI analyst
+# Local Qwen2.5 AI analyst (optional, local-only)
 # ─────────────────────────────────────────────────────────────
 
 class QwenAnalyst:
@@ -422,6 +223,8 @@ class QwenAnalyst:
             return False
 
     def _ask(self, prompt: str) -> str:
+        if not self._ollama_available():
+            return "[AI unavailable]"
         try:
             result = subprocess.run(
                 ["ollama", "run", self.model],
@@ -435,6 +238,20 @@ class QwenAnalyst:
             return "[AI timeout]"
         except Exception as e:
             return f"[AI error: {e}]"
+
+    def analyse_cve(self, cve_record: Dict) -> str:
+        """Get AI analysis of a CVE."""
+        if not self._ollama_available() or not cve_record:
+            return ""
+        prompt = (
+            f"You are a vulnerability analyst. Analyse this CVE briefly:\n"
+            f"CVE: {cve_record.get('cve_id', '')}\n"
+            f"Description: {cve_record.get('description', '')[:300]}\n"
+            f"CVSS Score: {cve_record.get('cvss_score')}\n"
+            f"Severity: {cve_record.get('severity')}\n\n"
+            f"Provide: 1) Likely attack vector 2) Ease of exploitation 3) Recommended mitigation (max 3 sentences)"
+        )
+        return self._ask(prompt)
 
     def analyse_finding(self, finding: Finding) -> str:
         if not self._ollama_available():
@@ -489,88 +306,20 @@ class QwenAnalyst:
         )
         return self._ask(prompt)
 
-    def blue_team_advice(self, findings: List[Finding]) -> str:
-        if not self._ollama_available() or not findings:
-            return ""
-        titles = "\n".join(f"- {f.title}" for f in findings[:15])
-        prompt = (
-            f"You are a Blue Team security engineer. Given these findings, "
-            f"list 5 prioritised hardening actions (one line each, format: "
-            f"'PRIORITY: action — tool/config'). No explanations.\n\n"
-            f"Findings:\n{titles}"
-        )
-        return self._ask(prompt)
-
 
 # ─────────────────────────────────────────────────────────────
-# IOC Extractor
-# ─────────────────────────────────────────────────────────────
-
-class IOCExtractor:
-    """Extract Indicators of Compromise from raw text."""
-
-    _IP_RE       = re.compile(
-        r"\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}"
-        r"(?:25[0-5]|2[0-4]\d|[01]?\d\d?)\b"
-    )
-    _DOMAIN_RE   = re.compile(
-        r"\b(?:[a-zA-Z0-9](?:[a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)"
-        r"+[a-zA-Z]{2,}\b"
-    )
-    _URL_RE      = re.compile(r"https?://[^\s\"'<>]+")
-    _HASH_MD5    = re.compile(r"\b[0-9a-fA-F]{32}\b")
-    _HASH_SHA1   = re.compile(r"\b[0-9a-fA-F]{40}\b")
-    _HASH_SHA256 = re.compile(r"\b[0-9a-fA-F]{64}\b")
-    _CVE_RE      = re.compile(r"CVE-\d{4}-\d{4,7}", re.IGNORECASE)
-    _EMAIL_RE    = re.compile(r"[\w.+-]+@[\w.-]+\.[a-zA-Z]{2,}")
-    _PRIVATE     = re.compile(
-        r"^(10\.|172\.(1[6-9]|2\d|3[01])\.|192\.168\.|127\.|0\.0\.0\.0|255\.)"
-    )
-
-    def extract(self, text: str) -> Dict[str, List[str]]:
-        ips = [
-            ip for ip in set(self._IP_RE.findall(text))
-            if not self._PRIVATE.match(ip)
-        ]
-        return {
-            "ips":             sorted(ips),
-            "domains":         sorted(set(self._DOMAIN_RE.findall(text))),
-            "urls":            sorted(set(self._URL_RE.findall(text))),
-            "hashes_md5":      sorted(set(self._HASH_MD5.findall(text))),
-            "hashes_sha1":     sorted(set(self._HASH_SHA1.findall(text))),
-            "hashes_sha256":   sorted(set(self._HASH_SHA256.findall(text))),
-            "cves":            sorted(set(self._CVE_RE.findall(text))),
-            "emails":          sorted(set(self._EMAIL_RE.findall(text))),
-        }
-
-    def extract_from_findings(self, findings: List[Finding]) -> Dict[str, List[str]]:
-        combined = " ".join(
-            f"{f.title} {f.description} {f.evidence}"
-            for f in findings
-        )
-        return self.extract(combined)
-
-
-# ─────────────────────────────────────────────────────────────
-# IntelEngine — orchestrates all of the above
+# IntelEngine — orchestrates CVE enrichment + AI
 # ─────────────────────────────────────────────────────────────
 
 class IntelEngine:
     """
     High-level interface used by ardf.py and the orchestrator.
-
-    Usage:
-        engine = IntelEngine()
-        report = engine.enrich_session(session, logger)
+    Focused on CVE enrichment and AI analysis.
     """
 
     def __init__(self):
-        self.cve    = CVEClient()
-        self.shodan = ShodanClient()
-        self.abuse  = AbuseIPDBClient()
-        self.vt     = VirusTotalClient()
-        self.ai     = QwenAnalyst()
-        self.ioc    = IOCExtractor()
+        self.cve = CVEClient()
+        self.ai  = QwenAnalyst()
 
     # ── CVE enrichment ────────────────────────────────────────
 
@@ -578,9 +327,17 @@ class IntelEngine:
         self,
         findings: List[Finding],
         logger:   ARDFLogger,
+        with_ai:  bool = True,
     ) -> Dict[str, Dict]:
+        """Enrich findings with CVE data from NVD."""
         enriched = {}
         cve_ids  = {f.cve for f in findings if f.cve}
+        
+        if not cve_ids:
+            logger.info("No CVEs found to enrich")
+            return {}
+        
+        logger.info(f"Enriching {len(cve_ids)} CVEs from NVD...")
         for cve_id in cve_ids:
             logger.info(f"NVD lookup: {cve_id}")
             record = self.cve.lookup(cve_id, logger=logger)
@@ -589,58 +346,26 @@ class IntelEngine:
                 logger.success(
                     f"{cve_id} | score={record['cvss_score']} | {record['severity']}"
                 )
+                # Add AI analysis if requested
+                if with_ai:
+                    analysis = self.ai.analyse_cve(record)
+                    if analysis and not analysis.startswith("[AI"):
+                        record["ai_analysis"] = analysis
             time.sleep(NVD_RATE_DELAY)
+        
+        logger.success(f"Enriched {len(enriched)} CVEs")
         return enriched
 
-    # ── Shodan enrichment ─────────────────────────────────────
-
-    def enrich_ips_shodan(
+    def search_cves_by_product(
         self,
-        ips:    List[str],
-        logger: ARDFLogger,
-    ) -> Dict[str, Dict]:
-        if not self.shodan._enabled():
-            logger.warning("SHODAN_API_KEY not set — skipping Shodan")
-            return {}
-        results = {}
-        for ip in ips:
-            logger.info(f"Shodan lookup: {ip}")
-            data = self.shodan.host(ip, logger=logger)
-            if data:
-                results[ip] = data
-                if data["vulns"]:
-                    logger.finding(
-                        f"Shodan CVEs for {ip}: {', '.join(data['vulns'][:5])}",
-                        severity="high",
-                        host=ip,
-                    )
-            time.sleep(1.0)
-        return results
-
-    # ── AbuseIPDB ─────────────────────────────────────────────
-
-    def check_reputation(
-        self,
-        ips:    List[str],
-        logger: ARDFLogger,
-    ) -> Dict[str, Optional[Dict]]:
-        if not self.abuse._enabled():
-            logger.warning("ABUSEIPDB_API_KEY not set — skipping reputation check")
-            return {}
-        logger.info(f"AbuseIPDB check for {len(ips)} IPs")
-        return self.abuse.bulk_check(ips, logger=logger)
-
-    # ── IOC extraction ────────────────────────────────────────
-
-    def extract_iocs(
-        self,
-        findings: List[Finding],
-        logger:   ARDFLogger,
-    ) -> Dict[str, List[str]]:
-        iocs  = self.ioc.extract_from_findings(findings)
-        total = sum(len(v) for v in iocs.values())
-        logger.success(f"IOC extraction complete | {total} indicators")
-        return iocs
+        product:   str,
+        version:   Optional[str] = None,
+        max_results: int = 20,
+        logger:    Optional[ARDFLogger] = None,
+    ) -> List[Dict]:
+        """Search CVEs for a product."""
+        keyword = product if not version else f"{product} {version}"
+        return self.cve.search_by_keyword(keyword, max_results, logger)
 
     # ── AI analysis ───────────────────────────────────────────
 
@@ -650,6 +375,7 @@ class IntelEngine:
         logger:  ARDFLogger,
         mode:    str = "full",
     ) -> Dict[str, str]:
+        """Run AI analysis on session findings."""
         findings = session.get_findings()
         if not findings:
             logger.warning("No findings to analyse")
@@ -667,9 +393,6 @@ class IntelEngine:
                 findings          = findings,
             )
 
-        if mode in ("blue", "full"):
-            output["blue_advice"] = self.ai.blue_team_advice(findings)
-
         # Per-finding remediation for top critical/high
         top          = [
             f for f in findings
@@ -678,7 +401,7 @@ class IntelEngine:
         remediations = {}
         for f in top:
             rem = self.ai.analyse_finding(f)
-            if rem:
+            if rem and not rem.startswith("[AI"):
                 remediations[f.id] = rem
         output["remediations"] = remediations
 
@@ -691,64 +414,56 @@ class IntelEngine:
         self,
         session: Session,
         logger:  ARDFLogger,
+        with_ai: bool = True,
     ) -> Dict[str, Any]:
         """
         One-call enrichment pipeline:
-          1. Extract IOCs
-          2. Enrich CVEs via NVD
-          3. Shodan host lookup (if key available)
-          4. AbuseIPDB reputation (if key available)
-          5. Qwen2.5 AI analysis
-          6. Save intel report to session folder
+          1. Enrich CVEs via NVD
+          2. Qwen2.5 AI analysis (optional)
+          3. Save intel report to session folder
         """
-        logger.banner("INTEL ENRICHMENT", style="bold yellow")
+        logger.banner("INTEL ENRICHMENT (CVE Focus)", style="bold yellow")
         findings = session.get_findings()
 
-        # 1. IOCs
-        iocs = self.extract_iocs(findings, logger)
+        # 1. CVEs
+        cve_records = self.enrich_cves(findings, logger, with_ai)
 
-        # 2. CVEs
-        cve_records = self.enrich_cves(findings, logger)
+        # 2. AI analysis (optional)
+        ai_output = {}
+        if with_ai and findings:
+            ai_output = self.ai_analyse(
+                session = session,
+                logger  = logger,
+                mode    = session.meta.mode.value,
+            )
 
-        # 3. Shodan
-        shodan_data = self.enrich_ips_shodan(iocs.get("ips", [])[:20], logger)
+        # 3. Add findings for critical CVEs
+        for cve_id, record in cve_records.items():
+            if record.get("severity") in ("critical", "high"):
+                # Check if finding already exists
+                existing = False
+                for f in findings:
+                    if f.cve == cve_id:
+                        existing = True
+                        break
+                if not existing:
+                    session.add_finding(Finding(
+                        source      = "intel.cve",
+                        title       = f"CVE: {cve_id}",
+                        description = record.get("description", "")[:300],
+                        severity    = SeverityLevel.CRITICAL if record.get("severity") == "critical" else SeverityLevel.HIGH,
+                        host        = session.meta.target,
+                        cve         = cve_id,
+                        tags        = ["cve", "nvd", "intel"],
+                        evidence    = json.dumps(record.get("references", [])[:3]),
+                        remediation = "Apply vendor patch or mitigations immediately"
+                    ))
 
-        # 4. AbuseIPDB
-        abuse_data = self.check_reputation(iocs.get("ips", [])[:30], logger)
-        for ip, rep in (abuse_data or {}).items():
-            if rep and rep.get("abuse_score", 0) >= 50:
-                session.add_finding(Finding(
-                    source      = "intel",
-                    title       = f"High-abuse-score IP: {ip}",
-                    description = (
-                        f"AbuseIPDB score {rep['abuse_score']}% | "
-                        f"reports={rep['total_reports']} | isp={rep['isp']}"
-                    ),
-                    severity    = (
-                        SeverityLevel.HIGH
-                        if rep["abuse_score"] >= 80
-                        else SeverityLevel.MEDIUM
-                    ),
-                    host        = ip,
-                    tags        = ["abuseipdb", "reputation"],
-                    evidence    = json.dumps(rep),
-                ))
-
-        # 5. AI analysis
-        ai_output = self.ai_analyse(
-            session = session,
-            logger  = logger,
-            mode    = session.meta.mode.value,
-        )
-
-        # 6. Persist
+        # 4. Persist
         report = {
             "session_id":   session.meta.session_id,
             "target":       session.meta.target,
-            "iocs":         iocs,
             "cve_records":  cve_records,
-            "shodan":       shodan_data,
-            "abuse_ipdb":   {ip: d for ip, d in (abuse_data or {}).items() if d},
             "ai":           ai_output,
             "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
@@ -777,7 +492,8 @@ def get_engine() -> IntelEngine:
 def run_intel(
     session: Session,
     logger:  Optional[ARDFLogger] = None,
+    with_ai: bool = True,
 ) -> Dict[str, Any]:
     if logger is None:
         logger = get_logger("intel")
-    return get_engine().enrich_session(session, logger)
+    return get_engine().enrich_session(session, logger, with_ai)

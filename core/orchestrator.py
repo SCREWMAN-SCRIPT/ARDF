@@ -1,497 +1,522 @@
 """
 core/orchestrator.py
-─────────────────────
-Orchestrator — the central execution engine of ARDF.
+────────────────────
+Mission Orchestrator for ARDF.
 
-Responsibilities
-────────────────
-  - Accept a mission plan from MissionPlanner
-  - Build a TaskGraph and execute tasks in dependency order
-  - Pass every sensitive task through ConfirmationGate
-  - Classify tool output after each run
-  - Hand failures to the Tactician for alternate selection
-  - Update mission state and session findings continuously
-  - Emit progress events for the interface layer
+Enhanced with workflow state management:
+  - Tracks execution state across modules
+  - Handles Cloudflare bypass workflows
+  - Manages dynamic branching based on findings
+  - Integrates with confirmation gates
+  - Supports pause/resume of complex workflows
 
-Design constraints
-──────────────────
-  - Every task with confirm=True stops and waits for human input
-  - No autonomous execution of exploit tasks without confirmation
-  - All tool calls go through module functions — never raw shell exec
-  - Failures are logged, not silently swallowed
+The orchestrator is the central execution engine that
+coordinates all modules and manages the mission lifecycle.
 """
 
-import importlib
 import json
 import time
-import traceback
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
 
-from core.mission             import Mission, MissionStatus
-from core.task_graph          import TaskGraph, Task, TaskStatus
-from core.confirmation_gate   import ConfirmationGate, GateDecision
-from core.response_classifier import ResponseClassifier
-from ai.analyst               import FindingAnalyst
-from ai.tactician             import Tactician, FailureType
-from modules.session          import Session
-from modules.logger           import get_logger, ARDFLogger
+from modules.logger import get_logger, ARDFLogger
+from modules.session import Session, Finding, SeverityLevel
 
 
 # ─────────────────────────────────────────────────────────────
-# Orchestrator
+# Workflow State Management
+# ─────────────────────────────────────────────────────────────
+
+class WorkflowStatus(Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    BYPASSING = "bypassing"
+    WAITING_CONFIRMATION = "waiting_confirmation"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    PAUSED = "paused"
+    CANCELLED = "cancelled"
+
+
+class WorkflowPhase(Enum):
+    INITIAL = "initial"
+    RECONNAISSANCE = "reconnaissance"
+    BYPASS = "bypass"
+    EXPLOITATION = "exploitation"
+    POST_EXPLOIT = "post_exploit"
+    REPORTING = "reporting"
+
+
+@dataclass
+class WorkflowState:
+    """Current state of the workflow execution."""
+    status: WorkflowStatus = WorkflowStatus.PENDING
+    phase: WorkflowPhase = WorkflowPhase.INITIAL
+    current_task: Optional[str] = None
+    completed_tasks: List[str] = field(default_factory=list)
+    failed_tasks: List[str] = field(default_factory=list)
+    waiting_for: Optional[str] = None
+    bypass_status: str = "not_attempted"  # not_attempted | in_progress | completed | failed
+    origin_ip: Optional[str] = None
+    waf_type: Optional[str] = None
+    cloudflare_version: Optional[str] = None
+    branch_path: List[str] = field(default_factory=list)
+    results: Dict[str, Any] = field(default_factory=dict)
+    errors: List[str] = field(default_factory=list)
+    started_at: Optional[float] = None
+    updated_at: Optional[float] = None
+
+
+# ─────────────────────────────────────────────────────────────
+# Orchestrator Class
 # ─────────────────────────────────────────────────────────────
 
 class Orchestrator:
     """
-    Central execution engine.
-
-    Takes a Mission with an attached plan and executes it
-    task by task, with confirmation gates, failure handling,
-    and continuous finding analysis.
+    Mission orchestrator with workflow state management.
     """
 
     def __init__(
         self,
-        session:         Session,
-        logger:          Optional[ARDFLogger] = None,
-        auto_approve:    bool = False,
-        non_interactive: bool = False,
-        max_retries:     int  = 2,
+        session: Session,
+        logger: Optional[ARDFLogger] = None,
+        state_path: Optional[Path] = None
     ):
-        self.session         = session
-        self.logger          = logger or get_logger("core.orchestrator")
-        self.max_retries     = max_retries
-        self.classifier      = ResponseClassifier()
-        self.gate            = ConfirmationGate(
-            logger          = self.logger,
-            auto_approve    = auto_approve,
-            non_interactive = non_interactive,
-            audit_path      = session.dir("logs") / "gate_audit.json",
-        )
-        self._analyst:    Optional[FindingAnalyst] = None
-        self._tactician:  Optional[Tactician]      = None
-        self._on_progress: Optional[Callable]      = None
+        self.session = session
+        self.logger = logger or get_logger("orchestrator")
+        self.state_path = state_path or session.dir("core") / "workflow_state.json"
+        self.state = self._load_state() or WorkflowState()
+        self._modules = {}
+        self._registered_handlers = {}
+        self._current_plan = None
 
-    # ── Public API ────────────────────────────────────────────
+    # ── State persistence ─────────────────────────────────────
 
-    def run(self, mission: Mission) -> Dict[str, Any]:
-        """
-        Execute a mission from start to finish.
-
-        Args:
-            mission : Mission object with an attached plan
-
-        Returns:
-            Execution summary dict
-        """
-        if not mission.plan:
-            raise ValueError("Mission has no plan — call MissionPlanner.plan() first")
-
-        self.logger.banner(
-            f"MISSION START — {self.session.meta.target}",
-            style="bold cyan",
-        )
-        self.logger.info(f"Objective : {mission.objective[:80]}")
-        self.logger.info(f"Mode      : {mission.mode.upper()}")
-        self.logger.info(f"Tasks     : {len(mission.plan.get('tasks', []))}")
-
-        # Build task graph
-        try:
-            graph = TaskGraph(mission.plan, logger=self.logger)
-        except ValueError as e:
-            mission.fail(str(e))
-            return {"error": str(e), "status": "failed"}
-
-        # Initialise AI components lazily
-        self._init_ai(mission)
-
-        mission.start()
-
-        # ── Main execution loop ───────────────────────────────
-        for task in graph.execution_generator():
-
-            if mission.should_abort:
-                self.logger.warning("Mission abort signal received")
-                break
-
-            if mission.should_pause:
-                self.logger.info("Mission paused — waiting for resume()")
-                while mission.should_pause and not mission.should_abort:
-                    time.sleep(2)
-
-            # Evaluate optional condition
-            if not self._evaluate_condition(task, mission):
-                self.logger.info(f"Task {task.id} condition not met — skipping")
-                task.mark_skipped("condition not met")
-                mission.mark_task_skipped(task.id, "condition not met")
-                continue
-
-            # Confirmation gate
-            if task.confirm:
-                decision = self.gate.request(
-                    task_id   = task.id,
-                    task_name = task.name,
-                    target    = self.session.meta.target,
-                    message   = task.confirm_msg,
-                    tier      = 3 if "post" in task.id else 2,
+    def _load_state(self) -> Optional[WorkflowState]:
+        """Load workflow state from disk."""
+        if self.state_path.exists():
+            try:
+                data = json.loads(self.state_path.read_text())
+                return WorkflowState(
+                    status=WorkflowStatus(data.get("status", "pending")),
+                    phase=WorkflowPhase(data.get("phase", "initial")),
+                    current_task=data.get("current_task"),
+                    completed_tasks=data.get("completed_tasks", []),
+                    failed_tasks=data.get("failed_tasks", []),
+                    waiting_for=data.get("waiting_for"),
+                    bypass_status=data.get("bypass_status", "not_attempted"),
+                    origin_ip=data.get("origin_ip"),
+                    waf_type=data.get("waf_type"),
+                    cloudflare_version=data.get("cloudflare_version"),
+                    branch_path=data.get("branch_path", []),
+                    results=data.get("results", {}),
+                    errors=data.get("errors", []),
+                    started_at=data.get("started_at"),
+                    updated_at=data.get("updated_at")
                 )
-                if decision != GateDecision.APPROVED:
-                    task.mark_skipped(f"gate {decision}")
-                    mission.mark_task_skipped(task.id, f"gate {decision}")
-                    self._emit_progress(mission, graph, task, "skipped")
-                    continue
+            except Exception as e:
+                self.logger.warning(f"Failed to load state: {e}")
+        return None
 
-            # Execute task with retry loop
-            success = self._execute_with_retry(task, mission, graph)
+    def _save_state(self) -> None:
+        """Save workflow state to disk."""
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            data = {
+                "status": self.state.status.value,
+                "phase": self.state.phase.value,
+                "current_task": self.state.current_task,
+                "completed_tasks": self.state.completed_tasks,
+                "failed_tasks": self.state.failed_tasks,
+                "waiting_for": self.state.waiting_for,
+                "bypass_status": self.state.bypass_status,
+                "origin_ip": self.state.origin_ip,
+                "waf_type": self.state.waf_type,
+                "cloudflare_version": self.state.cloudflare_version,
+                "branch_path": self.state.branch_path,
+                "results": self.state.results,
+                "errors": self.state.errors[-100:],
+                "started_at": self.state.started_at,
+                "updated_at": time.time()
+            }
+            self.state_path.write_text(json.dumps(data, indent=2, default=str))
+        except Exception as e:
+            self.logger.error(f"Failed to save state: {e}")
 
-            if success:
-                mission.mark_task_complete(task.id)
+    # ── State transitions ─────────────────────────────────────
+
+    def set_status(self, status: WorkflowStatus) -> None:
+        """Update workflow status."""
+        self.state.status = status
+        self.state.updated_at = time.time()
+        self._save_state()
+
+    def set_phase(self, phase: WorkflowPhase) -> None:
+        """Update workflow phase."""
+        self.state.phase = phase
+        self.state.updated_at = time.time()
+        self._save_state()
+
+    def set_current_task(self, task_id: str) -> None:
+        """Set current executing task."""
+        self.state.current_task = task_id
+        self.state.updated_at = time.time()
+        self._save_state()
+
+    def mark_task_completed(self, task_id: str, result: Any = None) -> None:
+        """Mark a task as completed."""
+        if task_id not in self.state.completed_tasks:
+            self.state.completed_tasks.append(task_id)
+        if result is not None:
+            self.state.results[task_id] = result
+        self.state.current_task = None
+        self.state.updated_at = time.time()
+        self._save_state()
+
+    def mark_task_failed(self, task_id: str, error: str) -> None:
+        """Mark a task as failed."""
+        if task_id not in self.state.failed_tasks:
+            self.state.failed_tasks.append(task_id)
+        self.state.errors.append(f"{task_id}: {error}")
+        self.state.current_task = None
+        self.state.updated_at = time.time()
+        self._save_state()
+
+    def set_bypass_status(self, status: str, origin_ip: Optional[str] = None) -> None:
+        """Update Cloudflare bypass status."""
+        self.state.bypass_status = status
+        if origin_ip:
+            self.state.origin_ip = origin_ip
+        self.state.updated_at = time.time()
+        self._save_state()
+
+    def set_waf_info(self, waf_type: str, version: Optional[str] = None) -> None:
+        """Set WAF information."""
+        self.state.waf_type = waf_type
+        self.state.cloudflare_version = version
+        self.state.updated_at = time.time()
+        self._save_state()
+
+    # ── Phase execution ───────────────────────────────────────
+
+    def execute_phase(self, phase: WorkflowPhase, params: Dict = None) -> Dict:
+        """
+        Execute a specific phase of the workflow.
+        """
+        self.set_phase(phase)
+        self.set_status(WorkflowStatus.RUNNING)
+        result = {"phase": phase.value, "status": "running", "tasks": []}
+
+        if phase == WorkflowPhase.INITIAL:
+            result = self._execute_initial(params or {})
+        elif phase == WorkflowPhase.RECONNAISSANCE:
+            result = self._execute_reconnaissance(params or {})
+        elif phase == WorkflowPhase.BYPASS:
+            result = self._execute_bypass(params or {})
+        elif phase == WorkflowPhase.EXPLOITATION:
+            result = self._execute_exploitation(params or {})
+        elif phase == WorkflowPhase.POST_EXPLOIT:
+            result = self._execute_post_exploit(params or {})
+        elif phase == WorkflowPhase.REPORTING:
+            result = self._execute_reporting(params or {})
+
+        return result
+
+    def _execute_initial(self, params: Dict) -> Dict:
+        """Initial phase: validate and prepare."""
+        target = self.session.meta.target
+        self.logger.info(f"Initialising workflow for {target}")
+
+        # Check if we have recon data
+        recon_path = self.session.dir("recon") / "recon_passive_summary.json"
+        if recon_path.exists():
+            result = {"status": "completed", "has_recon": True}
+            self.set_phase(WorkflowPhase.RECONNAISSANCE)
+        else:
+            result = {"status": "completed", "has_recon": False}
+            self.set_phase(WorkflowPhase.RECONNAISSANCE)
+
+        return result
+
+    def _execute_reconnaissance(self, params: Dict) -> Dict:
+        """Reconnaissance phase."""
+        depth = params.get("depth", "normal")
+        self.logger.info(f"Running reconnaissance at {depth} depth")
+
+        # Check if recon already exists
+        recon_path = self.session.dir("recon") / f"recon_{depth}_summary.json"
+        if recon_path.exists():
+            self.logger.info("Recon data already exists, loading")
+            try:
+                data = json.loads(recon_path.read_text())
+                # Check for Cloudflare in recon data
+                if data.get("cloudflare", {}).get("detected"):
+                    self.set_waf_info("cloudflare", data.get("cloudflare", {}).get("version"))
+                    self.set_bypass_status("detected")
+                    self.set_phase(WorkflowPhase.BYPASS)
+                else:
+                    self.set_phase(WorkflowPhase.EXPLOITATION)
+                return {"status": "completed", "using_existing": True, "data": data}
+            except Exception:
+                pass
+
+        # Execute recon
+        from modules.recon import run_recon
+        try:
+            result = run_recon(
+                target=self.session.meta.target,
+                depth=depth,
+                session=self.session,
+                logger=self.logger
+            )
+
+            # Check for Cloudflare
+            if result.get("cloudflare", {}).get("detected"):
+                self.set_waf_info("cloudflare", result.get("cloudflare", {}).get("version"))
+                self.set_bypass_status("detected")
+                self.set_phase(WorkflowPhase.BYPASS)
             else:
-                mission.mark_task_failed(task.id)
-                # Check if we should abort on critical failure
-                if self._should_abort_on_failure(task, mission):
-                    mission.abort(f"Critical task {task.id} failed")
-                    break
+                self.set_phase(WorkflowPhase.EXPLOITATION)
 
-            self._emit_progress(mission, graph, task,
-                                "completed" if success else "failed")
-
-            # Run post-task AI analysis every few tasks
-            if len(mission.completed_tasks) % 3 == 0:
-                self._run_ai_analysis(mission)
-
-        # ── Finalise mission ──────────────────────────────────
-        self.gate.save_audit_log()
-
-        if mission.status not in (MissionStatus.ABORTED, MissionStatus.FAILED):
-            mission.complete()
-
-        summary = self._build_summary(mission, graph)
-        self._save_summary(summary, mission)
-
-        self.logger.banner("MISSION COMPLETE", style="bold green")
-        self.logger.success(
-            f"Status={mission.status.value} | "
-            f"Findings={self.session.meta.findings_count} | "
-            f"Risk={self.session.meta.risk_score} | "
-            f"Duration={mission.duration_str()}"
-        )
-        return summary
-
-    def set_progress_callback(self, callback: Callable):
-        """Set a callback function called after each task completes."""
-        self._on_progress = callback
-
-    # ── Task execution ────────────────────────────────────────
-
-    def _execute_with_retry(
-        self,
-        task:    Task,
-        mission: Mission,
-        graph:   TaskGraph,
-    ) -> bool:
-        """
-        Execute a task with retry logic on failure.
-        Returns True if task succeeded, False if all retries exhausted.
-        """
-        for attempt in range(1, self.max_retries + 2):
-            if attempt > 1:
-                self.logger.info(f"Retry {attempt-1}/{self.max_retries} for task {task.id}")
-
-            mission.mark_task_running(task.id)
-            task.mark_running()
-
-            before_count = self.session.meta.findings_count
-            result       = self._execute_task(task)
-            after_count  = self.session.meta.findings_count
-
-            classification = self.classifier.classify(
-                stdout      = result.get("stdout", ""),
-                stderr      = result.get("stderr", ""),
-                return_code = result.get("return_code", 0),
-                tool_name   = task.name,
-            )
-
-            # Log classification summary
-            self.logger.info(
-                f"Task {task.id} classification: "
-                f"{self.classifier.summarise(classification)}"
-            )
-
-            # New findings created
-            if after_count > before_count:
-                self.logger.success(
-                    f"Task {task.id}: "
-                    f"{after_count - before_count} new findings"
-                )
-
-            # Success — task produced results or ran cleanly
-            if not classification.get("failure_type") or classification.get("has_findings"):
-                task.mark_completed(result)
-                return True
-
-            # Failure — ask tactician for alternate approach
-            failure_type = classification.get("failure_type", "unknown")
-            self.logger.warning(
-                f"Task {task.id} failed: {failure_type} "
-                f"(attempt {attempt})"
-            )
-
-            if attempt <= self.max_retries and task.can_retry:
-                tactic = self._get_tactic(task, failure_type, result)
-                if tactic and tactic.get("action") not in ("skip", "abort"):
-                    self.logger.info(f"Tactic: {tactic['action']} — {tactic['reason'][:60]}")
-                    task.retries += 1
-                    if tactic.get("delay", 0) > 0:
-                        time.sleep(tactic["delay"])
-                    # Apply tactic modifications to task args
-                    self._apply_tactic(task, tactic)
-                    continue
-
-            # All retries or tactic says skip
-            task.mark_failed(failure_type)
-            return False
-
-        task.mark_failed("max_retries_exceeded")
-        return False
-
-    def _execute_task(self, task: Task) -> Dict:
-        """
-        Execute a single task by calling its module function.
-        Returns dict with stdout, stderr, return_code, result.
-        """
-        self.logger.info(f"Executing: {task.name} ({task.module}.{task.function})")
-
-        try:
-            # Dynamically import and call the module function
-            module = importlib.import_module(task.module)
-            fn     = getattr(module, task.function)
-
-            # Build function arguments
-            args = self._build_args(task)
-
-            start  = time.time()
-            result = fn(**args)
-            elapsed = time.time() - start
-
-            self.logger.info(
-                f"Task {task.id} ran in {elapsed:.1f}s"
-            )
-
-            # Normalise result
-            if isinstance(result, dict):
-                return {
-                    "stdout":      result.get("output", ""),
-                    "stderr":      result.get("error", ""),
-                    "return_code": 0 if result else 1,
-                    "result":      result,
-                }
-            return {
-                "stdout":      str(result) if result else "",
-                "stderr":      "",
-                "return_code": 0 if result is not None else 1,
-                "result":      {},
-            }
-
-        except ModuleNotFoundError as e:
-            msg = f"Module not found: {task.module} — {e}"
-            self.logger.error(msg)
-            return {"stdout": "", "stderr": msg, "return_code": 127, "result": {}}
-
-        except AttributeError as e:
-            msg = f"Function not found: {task.function} in {task.module} — {e}"
-            self.logger.error(msg)
-            return {"stdout": "", "stderr": msg, "return_code": 1, "result": {}}
-
+            return {"status": "completed", "result": result}
         except Exception as e:
-            msg = f"Task {task.id} raised exception: {e}"
-            self.logger.error(msg)
-            self.logger.debug(traceback.format_exc())
-            return {"stdout": "", "stderr": str(e), "return_code": 1, "result": {}}
+            self.logger.error(f"Recon failed: {e}")
+            return {"status": "failed", "error": str(e)}
 
-    # ── Argument building ─────────────────────────────────────
+    def _execute_bypass(self, params: Dict) -> Dict:
+        """Cloudflare bypass phase."""
+        self.logger.info("Executing Cloudflare bypass phase")
 
-    def _build_args(self, task: Task) -> Dict:
-        """
-        Build keyword arguments for a module function call.
-        Injects session and logger automatically.
-        """
-        args = task.args.copy()
+        # Check if bypass already done
+        bypass_path = self.session.dir("bypass") / "bypass_report.json"
+        if bypass_path.exists():
+            try:
+                data = json.loads(bypass_path.read_text())
+                if data.get("bypass_achieved"):
+                    self.set_bypass_status("completed", data.get("best_candidate"))
+                    self.set_phase(WorkflowPhase.EXPLOITATION)
+                    return {"status": "completed", "using_existing": True, "data": data}
+            except Exception:
+                pass
 
-        # Always inject session and logger
-        args["session"] = self.session
-        args["logger"]  = self.logger
-
-        # Map common arg aliases
-        if "target" not in args:
-            args["target"] = self.session.meta.target
-        if "depth" not in args and task.function == "run_recon":
-            args["depth"] = "passive"
-
-        return args
-
-    # ── Tactic integration ────────────────────────────────────
-
-    def _get_tactic(
-        self,
-        task:         Task,
-        failure_type: str,
-        result:       Dict,
-    ) -> Optional[Dict]:
-        """Ask Tactician for alternate approach on failure."""
-        if not self._tactician:
-            return None
+        # Execute bypass
+        from modules.bypass import run_bypass
         try:
-            return self._tactician.handle_failure(
-                tool_name    = task.name,
-                failure_type = failure_type,
-                original_cmd = [],
-                stdout       = result.get("stdout", ""),
-                stderr       = result.get("stderr", ""),
-                context      = {"target": self.session.meta.target},
+            result = run_bypass(
+                target=self.session.meta.target,
+                session=self.session,
+                logger=self.logger
             )
+
+            if result.get("bypass_achieved"):
+                self.set_bypass_status("completed", result.get("best_candidate"))
+            else:
+                self.set_bypass_status("failed")
+
+            self.set_phase(WorkflowPhase.EXPLOITATION)
+            return {"status": "completed", "result": result}
         except Exception as e:
-            self.logger.debug(f"Tactician error: {e}")
-            return None
+            self.logger.error(f"Bypass failed: {e}")
+            self.set_bypass_status("failed")
+            return {"status": "failed", "error": str(e)}
 
-    def _apply_tactic(self, task: Task, tactic: Dict):
-        """Apply tactic modifications to a task's args."""
-        mods = tactic.get("modifications", {})
-        if mods:
-            task.args.update(mods)
+    def _execute_exploitation(self, params: Dict) -> Dict:
+        """Exploitation phase."""
+        self.logger.info("Executing exploitation phase")
 
-    # ── AI analysis ───────────────────────────────────────────
+        mode = params.get("mode", "full")
+        from modules.exploit import run_exploit
 
-    def _run_ai_analysis(self, mission: Mission):
-        """Run periodic AI analysis on accumulated findings."""
-        if not self._analyst:
-            return
         try:
-            findings = self.session.get_findings()
-            if not findings:
-                return
-            analysis = self._analyst.interpret_findings(
-                findings, use_ai=True
+            # Pass recon data if available
+            recon_data = None
+            recon_path = self.session.dir("recon") / "recon_depth_summary.json"
+            if recon_path.exists():
+                try:
+                    recon_data = json.loads(recon_path.read_text())
+                except Exception:
+                    pass
+
+            result = run_exploit(
+                session=self.session,
+                logger=self.logger,
+                mode=mode,
+                recon_data=recon_data,
+                workflow_enabled=True,
+                multi_vector_enabled=True
             )
-            chains = analysis.get("chains", [])
-            if chains:
-                self.logger.info(
-                    f"AI detected {len(chains)} attack chain(s): "
-                    f"{', '.join(c['name'] for c in chains[:3])}"
-                )
+
+            self.set_phase(WorkflowPhase.POST_EXPLOIT)
+            return {"status": "completed", "result": result}
         except Exception as e:
-            self.logger.debug(f"AI analysis error: {e}")
+            self.logger.error(f"Exploitation failed: {e}")
+            return {"status": "failed", "error": str(e)}
 
-    # ── Condition evaluation ──────────────────────────────────
+    def _execute_post_exploit(self, params: Dict) -> Dict:
+        """Post-exploitation phase."""
+        self.logger.info("Executing post-exploitation phase")
 
-    def _evaluate_condition(self, task: Task, mission: Mission) -> bool:
+        from modules.redteam import run_redteam
+
+        try:
+            result = run_redteam(
+                target=self.session.meta.target,
+                session=self.session,
+                logger=self.logger,
+                vectors=["cloudflare_bypass", "web_vulnerability"] if self.state.bypass_status == "completed" else None
+            )
+
+            self.set_phase(WorkflowPhase.REPORTING)
+            return {"status": "completed", "result": result}
+        except Exception as e:
+            self.logger.error(f"Post-exploit failed: {e}")
+            return {"status": "failed", "error": str(e)}
+
+    def _execute_reporting(self, params: Dict) -> Dict:
+        """Reporting phase."""
+        self.logger.info("Generating reports")
+
+        from modules.report import generate_report
+
+        try:
+            report_path = generate_report(
+                session=self.session,
+                logger=self.logger,
+                open_browser=False,
+                purple_mode=self.session.meta.mode.value == "purple"
+            )
+
+            self.set_status(WorkflowStatus.COMPLETED)
+            return {"status": "completed", "report_path": str(report_path)}
+        except Exception as e:
+            self.logger.error(f"Reporting failed: {e}")
+            self.set_status(WorkflowStatus.FAILED)
+            return {"status": "failed", "error": str(e)}
+
+    # ── Full workflow execution ──────────────────────────────
+
+    def run_full_workflow(self, params: Dict = None) -> Dict:
         """
-        Evaluate a task's optional condition string.
-        Simple evaluator — supports basic comparisons only.
+        Execute full workflow from start to finish.
         """
-        condition = task.condition
-        if not condition:
-            return True
+        params = params or {}
+        self.state.started_at = time.time()
+        self.set_status(WorkflowStatus.RUNNING)
 
-        # Very simple condition evaluator — no eval()
-        # Supports: "phase_id.output_key != []"
-        # and: "phase_id.output_key != null"
-        try:
-            if "!= []" in condition:
-                key = condition.split("!=")[0].strip()
-                parts = key.split(".")
-                if len(parts) >= 2:
-                    task_id = parts[0]
-                    prev = mission.task_by_id(task_id)
-                    if prev and prev.get("result"):
-                        field = parts[1] if len(parts) > 1 else ""
-                        value = prev["result"].get(field, [])
-                        return bool(value)
-            if "!= null" in condition:
-                return True
-        except Exception:
-            pass
-        return True
-
-    # ── Abort decision ────────────────────────────────────────
-
-    def _should_abort_on_failure(self, task: Task, mission: Mission) -> bool:
-        """Decide whether a task failure should abort the mission."""
-        # Only abort if task has on_failure=abort in plan
-        plan_task = mission.task_by_id(task.id)
-        if plan_task:
-            return plan_task.get("on_failure") == "abort"
-        return False
-
-    # ── Progress events ───────────────────────────────────────
-
-    def _emit_progress(
-        self,
-        mission: Mission,
-        graph:   TaskGraph,
-        task:    Task,
-        status:  str,
-    ):
-        """Emit progress event to registered callback."""
-        if not self._on_progress:
-            return
-        try:
-            event = {
-                "type":           "task_update",
-                "task_id":        task.id,
-                "task_name":      task.name,
-                "task_status":    status,
-                "mission_status": mission.status.value,
-                "graph_summary":  graph.summary(),
-                "findings_count": self.session.meta.findings_count,
-                "risk_score":     self.session.meta.risk_score,
-                "duration":       mission.duration_str(),
-                "timestamp":      time.time(),
-            }
-            self._on_progress(event)
-        except Exception as e:
-            self.logger.debug(f"Progress callback error: {e}")
-
-    # ── AI initialisation ─────────────────────────────────────
-
-    def _init_ai(self, mission: Mission):
-        """Lazily initialise AI components."""
-        try:
-            self._analyst   = FindingAnalyst(self.session, self.logger)
-            self._tactician = Tactician(self.session, self.logger)
-        except Exception as e:
-            self.logger.warning(f"AI components unavailable: {e} — continuing without AI")
-
-    # ── Summary ───────────────────────────────────────────────
-
-    def _build_summary(self, mission: Mission, graph: TaskGraph) -> Dict:
-        findings = self.session.get_findings()
-        return {
-            "mission_id":    mission.mission_id,
-            "session_id":    self.session.meta.session_id,
-            "target":        self.session.meta.target,
-            "objective":     mission.objective,
-            "mode":          mission.mode,
-            "status":        mission.status.value,
-            "duration":      mission.duration_str(),
-            "graph_summary": graph.summary(),
-            "findings": {
-                "total":    len(findings),
-                "critical": sum(1 for f in findings if f.severity.value == "critical"),
-                "high":     sum(1 for f in findings if f.severity.value == "high"),
-                "medium":   sum(1 for f in findings if f.severity.value == "medium"),
-                "low":      sum(1 for f in findings if f.severity.value == "low"),
-            },
-            "risk_score":    self.session.meta.risk_score,
-            "modules_run":   self.session.meta.modules_done,
-            "gate_decisions":self.gate.get_audit_log(),
+        results = {
+            "target": self.session.meta.target,
+            "phases": {},
+            "final_status": "running"
         }
 
-    def _save_summary(self, summary: Dict, mission: Mission):
-        """Save execution summary to session logs."""
-        out = self.session.dir("logs") / f"execution_{mission.mission_id}.json"
-        out.write_text(
-            json.dumps(summary, indent=2, default=str),
-            encoding="utf-8",
-        )
-        self.logger.info(f"Execution summary saved → {out}")
+        # Phase 1: Initial
+        results["phases"]["initial"] = self.execute_phase(WorkflowPhase.INITIAL, params)
+
+        # Phase 2: Reconnaissance
+        if self.state.phase.value in ["initial", "reconnaissance"]:
+            results["phases"]["reconnaissance"] = self.execute_phase(
+                WorkflowPhase.RECONNAISSANCE,
+                {"depth": params.get("depth", "normal")}
+            )
+
+        # Phase 3: Bypass (if Cloudflare detected)
+        if self.state.bypass_status == "detected":
+            results["phases"]["bypass"] = self.execute_phase(
+                WorkflowPhase.BYPASS,
+                params.get("bypass_params", {})
+            )
+
+        # Phase 4: Exploitation
+        if self.state.phase.value in ["reconnaissance", "bypass", "exploitation"]:
+            results["phases"]["exploitation"] = self.execute_phase(
+                WorkflowPhase.EXPLOITATION,
+                {"mode": params.get("exploit_mode", "full")}
+            )
+
+        # Phase 5: Post-exploit
+        if self.state.phase.value in ["exploitation", "post_exploit"]:
+            results["phases"]["post_exploit"] = self.execute_phase(
+                WorkflowPhase.POST_EXPLOIT,
+                params.get("post_exploit_params", {})
+            )
+
+        # Phase 6: Reporting
+        if self.state.phase.value in ["post_exploit", "reporting"]:
+            results["phases"]["reporting"] = self.execute_phase(
+                WorkflowPhase.REPORTING,
+                params.get("report_params", {})
+            )
+
+        # Final status
+        results["final_status"] = self.state.status.value
+        results["execution_time"] = time.time() - self.state.started_at
+
+        # Save final state
+        self._save_state()
+        return results
+
+    # ── Resume workflow ──────────────────────────────────────
+
+    def resume_workflow(self) -> Dict:
+        """
+        Resume a paused or failed workflow.
+        """
+        if self.state.status in (WorkflowStatus.COMPLETED, WorkflowStatus.PAUSED):
+            self.set_status(WorkflowStatus.RUNNING)
+
+            # Determine which phase to resume
+            phase = self.state.phase
+            if phase == WorkflowPhase.INITIAL:
+                return self.execute_phase(phase)
+            elif phase == WorkflowPhase.RECONNAISSANCE:
+                return self.execute_phase(phase, {"depth": "normal"})
+            elif phase == WorkflowPhase.BYPASS:
+                return self.execute_phase(phase)
+            elif phase == WorkflowPhase.EXPLOITATION:
+                return self.execute_phase(phase, {"mode": "full"})
+            elif phase == WorkflowPhase.POST_EXPLOIT:
+                return self.execute_phase(phase)
+            elif phase == WorkflowPhase.REPORTING:
+                return self.execute_phase(phase)
+
+        return {"status": "cannot_resume", "reason": f"Current status: {self.state.status.value}"}
+
+
+# ─────────────────────────────────────────────────────────────
+# Public entry point
+# ─────────────────────────────────────────────────────────────
+
+def run_orchestrator(
+    session: Session,
+    logger: Optional[ARDFLogger] = None,
+    params: Dict = None,
+    resume: bool = False,
+) -> Dict[str, Any]:
+    """
+    Run or resume the orchestrator for a session.
+
+    Args:
+        session: Active ARDF session
+        logger: ARDFLogger instance
+        params: Execution parameters
+        resume: Resume existing workflow
+
+    Returns:
+        Orchestration results
+    """
+    if logger is None:
+        logger = get_logger("orchestrator")
+
+    logger.banner("MISSION ORCHESTRATOR", style="bold green")
+
+    orchestrator = Orchestrator(session, logger)
+
+    if resume:
+        results = orchestrator.resume_workflow()
+    else:
+        results = orchestrator.run_full_workflow(params or {})
+
+    logger.success(f"Orchestration complete: {results.get('final_status', 'unknown')}")
+    return results

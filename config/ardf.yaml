@@ -1,114 +1,253 @@
 # ARDF Global Configuration
-# ─────────────────────────
-# Edit this file to customise ARDF behaviour.
-# All paths support environment variable expansion: ${HOME}, ${USER}
+# Enhanced with Cloudflare bypass and workflow settings
 
-version: "1.0"
-codename: "NightHawk"
+version: "2.0"
+session_dir: "output/sessions"
 
-# ── Paths ─────────────────────────────────────────────────────
-paths:
-  sessions_root:  output/sessions
-  reports_root:   output/reports
-  logs_root:      logs
-  wordlists:      config/wordlists.yaml
-  playbooks:      config/playbooks
+# ─────────────────────────────────────────────────────────────
+# Reconnaissance Settings
+# ─────────────────────────────────────────────────────────────
 
-# ── AI / Local model ──────────────────────────────────────────
-ai:
-  enabled:        true
-  provider:       ollama
-  ollama_base:    http://127.0.0.1:11434
-  # Model priority — first available is used per role
-  models:
-    tactical:
-      - qwen2.5:0.5b
-      - tinyllama:1.1b
-    analysis:
-      - qwen2.5:7b
-      - qwen2.5:0.5b
-      - tinyllama:1.1b
-    planning:
-      - qwen2.5:7b
-      - qwen2.5:0.5b
-      - tinyllama:1.1b
-  timeouts:
-    tactical:  60
-    analysis:  120
-    planning:  120
-  temperature:
-    default:   0.2
-    creative:  0.5
-    strict:    0.1
-
-# ── Execution defaults ────────────────────────────────────────
-execution:
-  max_retries:          2
-  default_timeout_mins: 60
-  parallel_tasks:       2
-  auto_approve:         false
-  non_interactive:      false
-  abort_on_critical:    false
-  gate_timeout_secs:    120
-
-# ── Recon defaults ────────────────────────────────────────────
 recon:
-  default_depth:     passive
-  max_subdomains:    1000
-  max_urls:          5000
-  resolve_ips:       true
-  screenshot_count:  50
-  nuclei_severity:   low,medium,high,critical
-  nuclei_rate:       150
-  nmap_timing:       T4
-  masscan_rate:      1000
+  default_depth: "normal"
+  max_subdomains: 1000
+  timeout: 3600
+  
+  # Cloudflare detection
+  cloudflare:
+    enabled: true
+    detect_headers: true
+    detect_ip_ranges: true
+    detect_challenge_page: true
+    origin_discovery:
+      enabled: true
+      methods:
+        - dns_history
+        - ssl_cert_history
+        - subdomain_enumeration
+        - mx_record
+        - worker_exploit
+      max_candidates: 10
 
-# ── Intel ─────────────────────────────────────────────────────
-intel:
-  nvd_rate_delay:    0.7
-  shodan_enabled:    true
-  abuseipdb_enabled: true
-  virustotal_enabled:true
-  max_ips_shodan:    20
-  max_ips_abuseipdb: 30
-  abuse_score_threshold: 50
+# ─────────────────────────────────────────────────────────────
+# Bypass Settings (NEW)
+# ─────────────────────────────────────────────────────────────
 
-# ── Reporting ─────────────────────────────────────────────────
+bypass:
+  enabled: true
+  default_technique: "all"
+  techniques:
+    dns_history:
+      enabled: true
+      priority: 1
+      requires_api: true
+    ssl_cert_history:
+      enabled: true
+      priority: 2
+      requires_api: false
+    subdomain_bypass:
+      enabled: true
+      priority: 3
+      requires_api: false
+      subdomains:
+        - dev
+        - test
+        - stage
+        - staging
+        - api
+        - admin
+        - mail
+        - remote
+        - vpn
+        - internal
+        - corp
+    mx_record:
+      enabled: true
+      priority: 4
+      requires_api: false
+    worker_exploit:
+      enabled: true
+      priority: 5
+      requires_api: false
+    cache_poison:
+      enabled: true
+      priority: 6
+      requires_api: false
+    host_header_bypass:
+      enabled: true
+      priority: 7
+      requires_api: false
+  timeout: 300
+  retry_count: 3
+  max_candidates: 5
+
+# ─────────────────────────────────────────────────────────────
+# Workflow Settings (NEW)
+# ─────────────────────────────────────────────────────────────
+
+workflow:
+  enabled: true
+  adaptive_branching: true
+  max_parallel_vectors: 3
+  fallback_on_failure: true
+  confirmation_tier: 2
+  phases:
+    - initial
+    - reconnaissance
+    - bypass
+    - exploitation
+    - post_exploit
+    - reporting
+  branch_conditions:
+    cloudflare_detected: "cloudflare_detected"
+    bypass_succeeded: "bypass_succeeded"
+    bypass_failed: "bypass_failed"
+    origin_known: "origin_known"
+
+# ─────────────────────────────────────────────────────────────
+# Red Team Settings (NEW)
+# ─────────────────────────────────────────────────────────────
+
+redteam:
+  enabled: true
+  multi_vector: true
+  evasion:
+    enabled: true
+    delay: 1.5
+    jitter: 0.5
+    user_agent_rotation: true
+    ip_rotation: false
+  vectors:
+    - cloudflare_bypass
+    - web_vulnerability
+    - service_exploit
+    - social_engineering
+    - supply_chain
+  max_workers: 3
+  timeout: 7200
+
+# ─────────────────────────────────────────────────────────────
+# AI Settings
+# ─────────────────────────────────────────────────────────────
+
+ai:
+  enabled: true
+  model: "qwen2.5:0.5b"
+  timeout: 60
+  fallback_model: "tinyllama:1.1b"
+  prompts:
+    bypass: "ai/prompts/bypass.txt"
+    workflow: "ai/prompts/workflow.txt"
+  cloudflare_aware: true
+
+# ─────────────────────────────────────────────────────────────
+# API Keys (from environment)
+# ─────────────────────────────────────────────────────────────
+
+api_keys:
+  shodan: "${SHODAN_API_KEY}"
+  abuseipdb: "${ABUSEIPDB_API_KEY}"
+  virustotal: "${VT_API_KEY}"
+  securitytrails: "${SECURITYTRAILS_API_KEY}"
+  censys:
+    id: "${CENSYS_API_ID}"
+    secret: "${CENSYS_API_SECRET}"
+  c99: "${C99_API_KEY}"
+
+# ─────────────────────────────────────────────────────────────
+# Reporting Settings
+# ─────────────────────────────────────────────────────────────
+
 reporting:
-  default_format:      html
-  open_browser:        false
-  include_appendix:    true
-  max_appendix_files:  10
-  max_appendix_size:   4000
-  severity_threshold:  info
+  format: "html"
+  include:
+    - executive_summary
+    - risk_overview
+    - attack_surface
+    - findings_table
+    - attack_chains
+    - kill_chain
+    - iocs
+    - mitre_map
+    - remediation_plan
+    - bypass_results
+    - workflow_results
+    - redteam_results
+  purple_mode: true
+  open_browser: false
 
-# ── Defense / Purple ──────────────────────────────────────────
-defense:
-  generate_sigma:       true
-  generate_hardening:   true
-  generate_remediation: true
-  sigma_status:         experimental
+# ─────────────────────────────────────────────────────────────
+# Logging Settings
+# ─────────────────────────────────────────────────────────────
 
-purple:
-  auto_confirm:         false
-  generate_coverage:    true
-  mitre_mapping:        true
-
-# ── Logging ───────────────────────────────────────────────────
 logging:
-  level:    DEBUG
-  console:  true
-  file:     true
-  jsonl:    true
-  quiet:    false
+  level: "info"
+  file: "ardf.log"
+  json: true
+  colors: true
+  max_size_mb: 100
+  backup_count: 5
 
-# ── Session ───────────────────────────────────────────────────
-session:
-  keep_last:        20
-  auto_archive:     false
-  compress_outputs: false
+# ─────────────────────────────────────────────────────────────
+# Performance Settings
+# ─────────────────────────────────────────────────────────────
 
-# Network / proxy configuration
-network:
-  proxies: []      # list of proxy URLs, e.g. http://user:pass@1.2.3.4:8080
-  rotate_proxies: false
+performance:
+  max_parallel_tools: 5
+  tool_timeout: 3600
+  global_timeout: 28800  # 8 hours
+  rate_limit: 10  # requests per second
+
+# ─────────────────────────────────────────────────────────────
+# Security Settings
+# ─────────────────────────────────────────────────────────────
+
+security:
+  confirmation_required: true
+  tier_2_confirmation: "one_click"
+  tier_3_confirmation: "typed_confirm"
+  allow_offensive: true
+  allow_exploitation: true
+  allow_post_exploit: false  # Default disabled for safety
+
+# ─────────────────────────────────────────────────────────────
+# Cloudflare-specific defaults
+# ─────────────────────────────────────────────────────────────
+
+cloudflare:
+  detection:
+    header_patterns:
+      - "cf-ray"
+      - "cf-cache-status"
+      - "cf-request-id"
+      - "cf-visitor"
+      - "cf-worker"
+      - "cf-edge-cache"
+    ip_ranges:
+      - "104.16.0.0/12"
+      - "172.64.0.0/13"
+      - "141.101.64.0/18"
+      - "188.114.96.0/20"
+      - "190.93.240.0/20"
+      - "197.234.240.0/22"
+      - "198.41.128.0/17"
+    challenge_path: "cdn-cgi/challenge-platform"
+  
+  bypass:
+    techniques:
+      dns_history:
+        api: securitytrails
+        timeout: 30
+      ssl_cert_history:
+        api: crt_sh
+        timeout: 30
+      subdomain_bypass:
+        timeout: 60
+      mx_record:
+        timeout: 30
+      worker_exploit:
+        timeout: 60
+      cache_poison:
+        timeout: 30
+      host_header_bypass:
+        timeout: 60

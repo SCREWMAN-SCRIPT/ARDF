@@ -1,497 +1,434 @@
 """
 ai/planner.py
 ─────────────
-MissionPlanner — converts a natural language objective or
-a target specification into an ordered task execution plan.
+AI Planning module for ARDF.
 
-Flow
-────
-  1. User provides objective (natural language or structured)
-  2. Planner asks local AI to decompose into tasks
-  3. Tasks are validated against available modules
-  4. Dependency graph is returned for the orchestrator
+Enhanced with Cloudflare-aware planning:
+  - Detects Cloudflare in reconnaissance data
+  - Generates bypass-first plans when CF detected
+  - Prioritizes origin discovery before exploitation
+  - Builds dependency graphs with bypass prerequisites
 
-Output schema
-─────────────
-  {
-    "mission_id": str,
-    "objective":  str,
-    "mode":       red|blue|purple|osint,
-    "tasks": [
-      {
-        "id":        str,
-        "name":      str,
-        "module":    str,
-        "function":  str,
-        "args":      dict,
-        "depends_on": [str],
-        "priority":  int,
-        "timeout":   int,
-        "confirm":   bool,
-        "tags":      [str]
-      }
-    ]
-  }
+The planner converts high-level objectives into executable task graphs
+with dependency resolution and confirmation tiers.
 """
 
 import json
-import uuid
-import time
-from pathlib import Path
-from typing import Any, Dict, List, Optional
+import re
+from typing import Any, Dict, List, Optional, Set, Tuple
+from dataclasses import dataclass, field
 
-from ai.local_model  import LocalModel, get_model, load_prompt
-from modules.logger  import get_logger, ARDFLogger
-from modules.session import Session
+from modules.logger import get_logger, ARDFLogger
+from modules.session import Session, Finding, SeverityLevel
 
 
 # ─────────────────────────────────────────────────────────────
-# Known module registry — what the planner can schedule
+# Data Structures
 # ─────────────────────────────────────────────────────────────
 
-MODULE_REGISTRY: Dict[str, Dict] = {
-    "recon_passive": {
-        "module":   "modules.recon",
-        "function": "run_recon",
-        "args":     {"depth": "passive"},
-        "tags":     ["recon", "passive", "osint"],
-        "timeout":  60,
-        "confirm":  False,
-    },
-    "recon_normal": {
-        "module":   "modules.recon",
-        "function": "run_recon",
-        "args":     {"depth": "normal"},
-        "tags":     ["recon", "active", "portscan"],
-        "timeout":  120,
-        "confirm":  False,
-    },
-    "recon_depth": {
-        "module":   "modules.recon",
-        "function": "run_recon",
-        "args":     {"depth": "depth"},
-        "tags":     ["recon", "deep", "nuclei", "fuzzing"],
-        "timeout":  240,
-        "confirm":  False,
-    },
-    "intel_enrich": {
-        "module":   "modules.intel",
-        "function": "run_intel",
-        "args":     {},
-        "tags":     ["intel", "cve", "enrichment"],
-        "timeout":  30,
-        "confirm":  False,
-    },
-    "exploit_web": {
-        "module":   "modules.exploit",
-        "function": "run_exploit",
-        "args":     {"mode": "web"},
-        "tags":     ["exploit", "web", "sqli", "xss"],
-        "timeout":  180,
-        "confirm":  True,
-    },
-    "exploit_network": {
-        "module":   "modules.exploit",
-        "function": "run_exploit",
-        "args":     {"mode": "network"},
-        "tags":     ["exploit", "network", "smb"],
-        "timeout":  180,
-        "confirm":  True,
-    },
-    "exploit_password": {
-        "module":   "modules.exploit",
-        "function": "run_exploit",
-        "args":     {"mode": "password"},
-        "tags":     ["exploit", "passwords", "bruteforce"],
-        "timeout":  120,
-        "confirm":  True,
-    },
-    "exploit_post": {
-        "module":   "modules.exploit",
-        "function": "run_exploit",
-        "args":     {"mode": "post"},
-        "tags":     ["exploit", "post", "privesc"],
-        "timeout":  120,
-        "confirm":  True,
-    },
-    "report_generate": {
-        "module":   "modules.report",
-        "function": "generate_report",
-        "args":     {},
-        "tags":     ["report", "output"],
-        "timeout":  10,
-        "confirm":  False,
-    },
-}
+@dataclass
+class Task:
+    """A single task in the execution plan."""
+    id: str
+    name: str
+    module: str
+    action: str
+    params: Dict[str, Any] = field(default_factory=dict)
+    depends_on: List[str] = field(default_factory=list)
+    confirmation_tier: int = 1  # 1=auto, 2=yes/no, 3=typed CONFIRM
+    critical: bool = False
+    description: str = ""
 
-# Maps keywords in objectives to task names
-KEYWORD_TASK_MAP: Dict[str, List[str]] = {
-    "passive":      ["recon_passive", "intel_enrich", "report_generate"],
-    "osint":        ["recon_passive", "intel_enrich", "report_generate"],
-    "recon":        ["recon_passive", "recon_normal", "intel_enrich", "report_generate"],
-    "full":         list(MODULE_REGISTRY.keys()),
-    "pentest":      list(MODULE_REGISTRY.keys()),
-    "web":          ["recon_passive", "recon_normal", "recon_depth", "intel_enrich",
-                     "exploit_web", "report_generate"],
-    "network":      ["recon_passive", "recon_normal", "intel_enrich",
-                     "exploit_network", "report_generate"],
-    "exploit":      ["recon_passive", "recon_normal", "intel_enrich",
-                     "exploit_web", "exploit_network", "report_generate"],
-    "password":     ["recon_passive", "recon_normal", "intel_enrich",
-                     "exploit_password", "report_generate"],
-    "post":         ["exploit_post", "report_generate"],
-    "report":       ["report_generate"],
-    "intel":        ["intel_enrich"],
-    "cve":          ["intel_enrich", "report_generate"],
-    "enumerate":    ["recon_passive", "recon_normal", "intel_enrich", "report_generate"],
-    "scan":         ["recon_normal", "intel_enrich", "report_generate"],
-    "audit":        ["recon_passive", "recon_normal", "recon_depth",
-                     "intel_enrich", "exploit_web", "report_generate"],
-}
 
-# Default task dependency order
-TASK_DEPENDENCIES: Dict[str, List[str]] = {
-    "recon_passive":   [],
-    "recon_normal":    ["recon_passive"],
-    "recon_depth":     ["recon_normal"],
-    "intel_enrich":    ["recon_passive"],
-    "exploit_web":     ["recon_normal", "intel_enrich"],
-    "exploit_network": ["recon_normal", "intel_enrich"],
-    "exploit_password":["exploit_web", "exploit_network"],
-    "exploit_post":    ["exploit_password"],
-    "report_generate": ["intel_enrich"],
-}
+@dataclass
+class Plan:
+    """Complete execution plan with tasks and metadata."""
+    objective: str
+    target: str
+    tasks: List[Task]
+    context: Dict[str, Any] = field(default_factory=dict)
+    estimated_steps: int = 0
+    risk_level: str = "medium"
 
 
 # ─────────────────────────────────────────────────────────────
-# MissionPlanner
+# Planner Class
 # ─────────────────────────────────────────────────────────────
 
-class MissionPlanner:
+class Planner:
     """
-    Converts a user objective into an ordered task execution plan.
-
-    Two planning modes:
-      - rule_based : keyword matching → fast, deterministic, offline-safe
-      - ai_assisted: Qwen2.5 decomposition → flexible, handles novel requests
+    AI-driven mission planner with Cloudflare awareness.
     """
 
-    def __init__(
-        self,
-        session: Session,
-        logger:  Optional[ARDFLogger] = None,
-        ai_model: Optional[LocalModel] = None,
-    ):
-        self.session  = session
-        self.logger   = logger or get_logger("ai.planner")
-        self.ai       = ai_model or get_model(role="planning", logger=self.logger)
-        self._prompt_template = load_prompt("plan_mission")
+    def __init__(self, logger: Optional[ARDFLogger] = None):
+        self.logger = logger or get_logger("planner")
+        self._plan_cache: Dict[str, Plan] = {}
 
-    # ── Public entry point ────────────────────────────────────
+    # ── Objective parsing ────────────────────────────────────
 
-    def plan(
+    def parse_objective(self, objective: str) -> Dict[str, Any]:
+        """Parse natural language objective into structured intent."""
+        objective_lower = objective.lower()
+        intent = {
+            "type": "unknown",
+            "target": None,
+            "depth": "normal",
+            "bypass_required": False,
+            "exploit_type": None,
+            "post_exploit": False
+        }
+
+        # Detect target
+        target_match = re.search(r'(?:target|against|on)\s+([a-zA-Z0-9.-]+)', objective_lower)
+        if target_match:
+            intent["target"] = target_match.group(1)
+
+        # Detect depth
+        if "deep" in objective_lower or "depth" in objective_lower:
+            intent["depth"] = "depth"
+        elif "passive" in objective_lower or "osint" in objective_lower:
+            intent["depth"] = "passive"
+        else:
+            intent["depth"] = "normal"
+
+        # Detect bypass requirement
+        if any(word in objective_lower for word in ["bypass", "cloudflare", "waf", "origin"]):
+            intent["bypass_required"] = True
+
+        # Detect exploit type
+        if "web" in objective_lower or "app" in objective_lower:
+            intent["exploit_type"] = "web"
+        elif "network" in objective_lower:
+            intent["exploit_type"] = "network"
+        elif "credential" in objective_lower or "password" in objective_lower:
+            intent["exploit_type"] = "credential"
+
+        # Detect post-exploit
+        if any(word in objective_lower for word in ["persist", "lateral", "exfil", "post"]):
+            intent["post_exploit"] = True
+
+        # Classify objective type
+        if "recon" in objective_lower:
+            intent["type"] = "recon"
+        elif "exploit" in objective_lower or "attack" in objective_lower:
+            intent["type"] = "exploit"
+        elif "purple" in objective_lower:
+            intent["type"] = "purple"
+        elif "blue" in objective_lower or "defend" in objective_lower:
+            intent["type"] = "blue"
+        else:
+            intent["type"] = "full"
+
+        return intent
+
+    # ── Cloudflare-aware plan generation ─────────────────────
+
+    def generate_plan(
         self,
-        objective:  str,
-        mode:       str = "auto",
-        use_ai:     bool = True,
-    ) -> Dict[str, Any]:
+        objective: str,
+        target: str,
+        recon_data: Optional[Dict[str, Any]] = None,
+        existing_findings: Optional[List[Finding]] = None,
+    ) -> Plan:
         """
-        Generate a mission plan from a natural language objective.
+        Generate an execution plan from an objective.
 
         Args:
-            objective : plain-English description of what to do
-            mode      : red | blue | purple | osint | auto
-            use_ai    : use local AI for decomposition (else rule-based only)
+            objective: Natural language objective
+            target: Target domain/IP
+            recon_data: Existing reconnaissance data (for context)
+            existing_findings: Existing findings (for context)
 
         Returns:
-            Mission plan dict with ordered task list
+            Plan object with task list
         """
-        self.logger.info(f"Planning mission: '{objective[:80]}...' mode={mode}")
+        self.logger.info(f"Generating plan for: {objective}")
 
-        # Detect mode from objective if auto
-        if mode == "auto":
-            mode = self._detect_mode(objective)
-
-        # Try AI planning first, fall back to rule-based
-        plan = None
-        if use_ai:
-            plan = self._ai_plan(objective, mode)
-
-        if not plan:
-            self.logger.info("Using rule-based planner fallback")
-            plan = self._rule_plan(objective, mode)
-
-        # Validate and enrich
-        plan = self._validate_plan(plan)
-        plan = self._inject_session_context(plan)
-
-        self.logger.success(
-            f"Plan ready | tasks={len(plan['tasks'])} mode={plan['mode']}"
-        )
-        return plan
-
-    def plan_from_finding(
-        self,
-        finding_title: str,
-        finding_severity: str,
-        host: str,
-    ) -> Dict[str, Any]:
-        """
-        Generate a focused follow-up plan from a specific finding.
-        Used by the orchestrator when a critical finding triggers expansion.
-        """
-        objective = (
-            f"Investigate and exploit this {finding_severity} severity finding: "
-            f"'{finding_title}' on host {host}. "
-            f"Focus on confirming exploitability and finding lateral movement paths."
-        )
-        return self.plan(objective, mode="red", use_ai=True)
-
-    def plan_from_playbook(
-        self,
-        phases: List[Dict],
-        mode:   str,
-    ) -> Dict[str, Any]:
-        """
-        Convert a loaded playbook phase list into a mission plan.
-        Used by playbook/executor.py.
-        """
-        mission_id = uuid.uuid4().hex[:8]
-        tasks = []
-        for i, phase in enumerate(phases):
-            task_id = phase.get("id", f"task_{i:02d}")
-            tasks.append({
-                "id":         task_id,
-                "name":       phase.get("name", task_id),
-                "module":     phase.get("module", ""),
-                "function":   phase.get("function", ""),
-                "args":       self._extract_args(phase),
-                "depends_on": phase.get("depends_on", []),
-                "priority":   i,
-                "timeout":    phase.get("timeout_minutes", 60) * 60,
-                "confirm":    phase.get("confirmation", False),
-                "confirm_msg":phase.get("confirmation_message", ""),
-                "condition":  phase.get("condition", ""),
-                "tags":       phase.get("tags", []),
-            })
-        return {
-            "mission_id": mission_id,
-            "objective":  f"Execute {mode} playbook",
-            "mode":       mode,
-            "tasks":      tasks,
-            "source":     "playbook",
+        intent = self.parse_objective(objective)
+        context = {
+            "intent": intent,
+            "target": target,
+            "recon_data": recon_data or {},
+            "findings": existing_findings or []
         }
 
-    # ── AI-assisted planning ──────────────────────────────────
+        # Detect Cloudflare from recon data
+        cloudflare_detected = self._detect_cloudflare(recon_data, existing_findings)
+        origin_candidates = self._get_origin_candidates(recon_data, existing_findings)
 
-    def _ai_plan(self, objective: str, mode: str) -> Optional[Dict]:
-        """Ask local AI to decompose the objective into tasks."""
-        if not self._prompt_template:
-            return None
-
-        available_tasks = json.dumps(
-            {k: {"tags": v["tags"], "description": self._task_description(k)}
-             for k, v in MODULE_REGISTRY.items()},
-            indent=2,
-        )
-
-        prompt = self._prompt_template.format(
-            objective       = objective,
-            mode            = mode,
-            target          = self.session.meta.target,
-            available_tasks = available_tasks,
-            mission_id      = uuid.uuid4().hex[:8],
-        )
-
-        self.logger.info("Asking local AI to decompose mission...")
-        result = self.ai.json_generate(prompt=prompt, temperature=0.1)
-
-        if not result or "tasks" not in result:
-            self.logger.warning("AI planner returned invalid structure")
-            return None
-
-        # Normalise AI output to our schema
-        return self._normalise_ai_plan(result, objective, mode)
-
-    def _normalise_ai_plan(
-        self,
-        raw:       Dict,
-        objective: str,
-        mode:      str,
-    ) -> Dict:
         tasks = []
-        for i, t in enumerate(raw.get("tasks", [])):
-            task_id = t.get("id", f"ai_task_{i:02d}")
-            # Map AI task name to known module
-            module_key = self._resolve_module_key(t.get("name", ""), t.get("tags", []))
-            if not module_key:
-                continue
-            reg = MODULE_REGISTRY[module_key]
-            tasks.append({
-                "id":         task_id,
-                "name":       t.get("name", module_key),
-                "module":     reg["module"],
-                "function":   reg["function"],
-                "args":       {**reg["args"], **t.get("args", {})},
-                "depends_on": t.get("depends_on", TASK_DEPENDENCIES.get(module_key, [])),
-                "priority":   t.get("priority", i),
-                "timeout":    t.get("timeout", reg["timeout"]) * 60,
-                "confirm":    t.get("confirm", reg["confirm"]),
-                "confirm_msg":t.get("confirm_msg", ""),
-                "tags":       t.get("tags", reg["tags"]),
-            })
-        return {
-            "mission_id": raw.get("mission_id", uuid.uuid4().hex[:8]),
-            "objective":  objective,
-            "mode":       mode,
-            "tasks":      tasks,
-            "source":     "ai",
-        }
 
-    # ── Rule-based planning ───────────────────────────────────
+        # ── Phase 1: Reconnaissance ──────────────────────────
+        if intent["type"] in ("recon", "full", "purple"):
+            depth = intent.get("depth", "normal")
+            tasks.append(Task(
+                id="recon_1",
+                name=f"Reconnaissance ({depth})",
+                module="recon",
+                action="run_recon",
+                params={"depth": depth},
+                confirmation_tier=1,
+                description=f"Run {depth} reconnaissance on {target}"
+            ))
 
-    def _rule_plan(self, objective: str, mode: str) -> Dict:
-        """Fast keyword-based task selection."""
-        obj_lower  = objective.lower()
-        task_set   = set()
+        # ── Phase 2: Cloudflare Bypass (if detected) ────────
+        if cloudflare_detected and intent.get("bypass_required", True):
+            tasks.append(Task(
+                id="bypass_1",
+                name="Cloudflare Bypass",
+                module="bypass",
+                action="run_bypass",
+                params={"technique": "all"},
+                depends_on=["recon_1"] if tasks else [],
+                confirmation_tier=2,
+                critical=True,
+                description=f"Bypass Cloudflare on {target} to find origin IP"
+            ))
 
-        for keyword, tasks in KEYWORD_TASK_MAP.items():
-            if keyword in obj_lower:
-                task_set.update(tasks)
+            # If origin candidates already exist, add direct attack
+            if origin_candidates:
+                tasks.append(Task(
+                    id="origin_1",
+                    name=f"Direct Origin Attack ({origin_candidates[0]})",
+                    module="workflow",
+                    action="direct_origin",
+                    params={"ip": origin_candidates[0]},
+                    depends_on=["bypass_1"],
+                    confirmation_tier=2,
+                    critical=True,
+                    description=f"Directly attack origin IP {origin_candidates[0]}"
+                ))
 
-        # Mode-based defaults
-        if not task_set:
-            if mode in ("red", "purple"):
-                task_set = set(MODULE_REGISTRY.keys())
-            elif mode == "osint":
-                task_set = {"recon_passive", "intel_enrich", "report_generate"}
+        # ── Phase 3: Exploitation ────────────────────────────
+        if intent["type"] in ("exploit", "full", "purple"):
+            exploit_type = intent.get("exploit_type", "web")
+
+            if exploit_type == "web":
+                tasks.append(Task(
+                    id="exploit_web_1",
+                    name="Web Application Exploitation",
+                    module="exploit",
+                    action="web_scan",
+                    params={"mode": "web"},
+                    depends_on=["origin_1"] if any(t.id == "origin_1" for t in tasks) else ["recon_1"],
+                    confirmation_tier=3,
+                    critical=True,
+                    description="Run web application exploitation"
+                ))
+            elif exploit_type == "network":
+                tasks.append(Task(
+                    id="exploit_net_1",
+                    name="Network Exploitation",
+                    module="exploit",
+                    action="network_scan",
+                    params={"mode": "network"},
+                    depends_on=["origin_1"] if any(t.id == "origin_1" for t in tasks) else ["recon_1"],
+                    confirmation_tier=3,
+                    critical=True,
+                    description="Run network exploitation"
+                ))
             else:
-                task_set = {"recon_passive", "recon_normal", "intel_enrich", "report_generate"}
+                tasks.append(Task(
+                    id="exploit_full_1",
+                    name="Full Exploitation",
+                    module="exploit",
+                    action="full",
+                    params={"mode": "full"},
+                    depends_on=["origin_1"] if any(t.id == "origin_1" for t in tasks) else ["recon_1"],
+                    confirmation_tier=3,
+                    critical=True,
+                    description="Run full exploitation"
+                ))
 
-        # Always include report
-        task_set.add("report_generate")
+        # ── Phase 4: Post-Exploitation ───────────────────────
+        if intent.get("post_exploit", False) and intent["type"] in ("exploit", "full"):
+            tasks.append(Task(
+                id="post_1",
+                name="Post-Exploitation",
+                module="redteam",
+                action="post_exploit",
+                params={"actions": ["persistence", "lateral_movement", "exfil"]},
+                depends_on=["exploit_web_1", "exploit_net_1", "exploit_full_1"],
+                confirmation_tier=3,
+                description="Run post-exploitation actions"
+            ))
 
-        # Build ordered task list respecting dependencies
-        ordered = self._topological_sort(list(task_set))
-        tasks   = []
-        for i, key in enumerate(ordered):
-            if key not in MODULE_REGISTRY:
-                continue
-            reg = MODULE_REGISTRY[key]
-            deps = [d for d in TASK_DEPENDENCIES.get(key, []) if d in task_set]
-            tasks.append({
-                "id":         key,
-                "name":       key.replace("_", " ").title(),
-                "module":     reg["module"],
-                "function":   reg["function"],
-                "args":       reg["args"].copy(),
-                "depends_on": deps,
-                "priority":   i,
-                "timeout":    reg["timeout"] * 60,
-                "confirm":    reg["confirm"],
-                "confirm_msg": f"Ready to run {key.replace('_',' ')}. Confirm?",
-                "tags":       reg["tags"],
-            })
+        # ── Phase 5: Reporting ───────────────────────────────
+        if intent["type"] in ("full", "purple"):
+            tasks.append(Task(
+                id="report_1",
+                name="Generate Report",
+                module="report",
+                action="generate_report",
+                params={"purple_mode": intent["type"] == "purple"},
+                depends_on=[t.id for t in tasks if t.id.startswith("exploit") or t.id.startswith("recon")],
+                confirmation_tier=1,
+                description="Generate HTML report"
+            ))
 
-        return {
-            "mission_id": uuid.uuid4().hex[:8],
-            "objective":  objective,
-            "mode":       mode,
-            "tasks":      tasks,
-            "source":     "rule_based",
-        }
+        # Build plan
+        plan = Plan(
+            objective=objective,
+            target=target,
+            tasks=tasks,
+            context=context,
+            estimated_steps=len(tasks),
+            risk_level=self._calculate_risk(tasks)
+        )
 
-    # ── Helpers ───────────────────────────────────────────────
+        self._plan_cache[target] = plan
+        self.logger.success(f"Plan generated with {len(tasks)} tasks")
 
-    def _detect_mode(self, objective: str) -> str:
-        obj = objective.lower()
-        if any(k in obj for k in ("purple", "detect", "blue team", "defense")):
-            return "purple"
-        if any(k in obj for k in ("osint", "passive", "footprint")):
-            return "osint"
-        if any(k in obj for k in ("harden", "monitor", "blue")):
-            return "blue"
-        return "red"
+        return plan
 
-    def _resolve_module_key(self, name: str, tags: List[str]) -> Optional[str]:
-        """Map AI-generated task name/tags to a registry key."""
-        name_lower = name.lower().replace(" ", "_")
-        if name_lower in MODULE_REGISTRY:
-            return name_lower
-        for key in MODULE_REGISTRY:
-            if key in name_lower or name_lower in key:
-                return key
-        for tag in tags:
-            for key, reg in MODULE_REGISTRY.items():
-                if tag in reg["tags"]:
-                    return key
-        return None
+    # ── Cloudflare detection helpers ─────────────────────────
 
-    def _topological_sort(self, task_keys: List[str]) -> List[str]:
-        """Sort tasks respecting dependencies."""
+    def _detect_cloudflare(
+        self,
+        recon_data: Optional[Dict],
+        findings: Optional[List[Finding]]
+    ) -> bool:
+        """Check if Cloudflare was detected in recon data or findings."""
+        if recon_data:
+            # Check for Cloudflare in recon data
+            cf = recon_data.get("cloudflare", {})
+            if cf.get("detected"):
+                return True
+            if recon_data.get("waf_type") == "cloudflare":
+                return True
+
+        if findings:
+            for f in findings:
+                if "cloudflare" in f.tags or "waf" in f.tags:
+                    if "cloudflare" in f.title.lower() or "cf-" in f.title.lower():
+                        return True
+        return False
+
+    def _get_origin_candidates(
+        self,
+        recon_data: Optional[Dict],
+        findings: Optional[List[Finding]]
+    ) -> List[str]:
+        """Extract origin candidates from recon data or findings."""
+        candidates = []
+
+        if recon_data:
+            candidates.extend(recon_data.get("origin_candidates", []))
+            cf = recon_data.get("cloudflare", {})
+            candidates.extend(cf.get("origin_candidates", []))
+
+        if findings:
+            for f in findings:
+                if "origin" in f.tags and f.host:
+                    candidates.append(f.host)
+
+        # Deduplicate
+        return list(dict.fromkeys(candidates))
+
+    def _calculate_risk(self, tasks: List[Task]) -> str:
+        """Calculate risk level based on tasks."""
+        if any(t.confirmation_tier == 3 and t.critical for t in tasks):
+            return "high"
+        if any(t.confirmation_tier == 2 for t in tasks):
+            return "medium"
+        return "low"
+
+    # ── Plan execution helpers ──────────────────────────────
+
+    def get_task_dependencies(self, plan: Plan) -> Dict[str, List[str]]:
+        """Get dependency graph for tasks."""
+        return {t.id: t.depends_on for t in plan.tasks}
+
+    def get_execution_order(self, plan: Plan) -> List[Task]:
+        """Get topological execution order."""
         visited = set()
-        result  = []
+        order = []
+        task_map = {t.id: t for t in plan.tasks}
 
-        def visit(key: str):
-            if key in visited or key not in MODULE_REGISTRY:
+        def dfs(task_id: str):
+            if task_id in visited:
                 return
-            visited.add(key)
-            for dep in TASK_DEPENDENCIES.get(key, []):
-                if dep in task_keys:
-                    visit(dep)
-            result.append(key)
+            visited.add(task_id)
+            for dep in task_map.get(task_id, Task("", "", "", "", {})).depends_on:
+                if dep in task_map:
+                    dfs(dep)
+            order.append(task_map[task_id])
 
-        for key in task_keys:
-            visit(key)
-        return result
+        for task in plan.tasks:
+            if task.id not in visited:
+                dfs(task.id)
 
-    def _validate_plan(self, plan: Dict) -> Dict:
-        """Ensure all tasks have required fields."""
-        valid_tasks = []
-        for task in plan.get("tasks", []):
-            if not task.get("module") or not task.get("function"):
-                self.logger.warning(f"Skipping invalid task: {task.get('id','?')}")
+        return order
+
+    def suggest_next_steps(
+        self,
+        plan: Plan,
+        completed_task_ids: List[str]
+    ) -> List[Task]:
+        """Suggest next tasks based on completed tasks."""
+        completed = set(completed_task_ids)
+        ready = []
+
+        for task in plan.tasks:
+            if task.id in completed:
                 continue
-            task.setdefault("args", {})
-            task.setdefault("depends_on", [])
-            task.setdefault("priority", 99)
-            task.setdefault("timeout", 3600)
-            task.setdefault("confirm", False)
-            task.setdefault("confirm_msg", "")
-            task.setdefault("tags", [])
-            valid_tasks.append(task)
-        plan["tasks"] = valid_tasks
-        return plan
+            if all(dep in completed for dep in task.depends_on):
+                ready.append(task)
 
-    def _inject_session_context(self, plan: Dict) -> Dict:
-        """Inject target and session info into all task args."""
-        for task in plan.get("tasks", []):
-            task["args"]["target"]     = self.session.meta.target
-            task["args"]["session_id"] = self.session.meta.session_id
-        plan["target"]     = self.session.meta.target
-        plan["session_id"] = self.session.meta.session_id
-        return plan
+        return ready
 
-    def _extract_args(self, phase: Dict) -> Dict:
-        skip = {
-            "id","name","module","function","depends_on",
-            "confirmation","confirmation_message","timeout_minutes",
-            "on_failure","condition","tags","outputs","inputs",
-            "tools","red_actions","blue_actions","mitre_mapping",
-            "settings",
+    # ── Export plan ──────────────────────────────────────────
+
+    def export_plan(self, plan: Plan, path: Path) -> None:
+        """Export plan to JSON file."""
+        data = {
+            "objective": plan.objective,
+            "target": plan.target,
+            "estimated_steps": plan.estimated_steps,
+            "risk_level": plan.risk_level,
+            "tasks": [
+                {
+                    "id": t.id,
+                    "name": t.name,
+                    "module": t.module,
+                    "action": t.action,
+                    "params": t.params,
+                    "depends_on": t.depends_on,
+                    "confirmation_tier": t.confirmation_tier,
+                    "critical": t.critical,
+                    "description": t.description
+                }
+                for t in plan.tasks
+            ]
         }
-        return {k: v for k, v in phase.items() if k not in skip}
+        path.write_text(json.dumps(data, indent=2, default=str))
 
-    def _task_description(self, key: str) -> str:
-        descriptions = {
-            "recon_passive":    "Passive OSINT — subdomain enum, WHOIS, crt.sh, email harvest",
-            "recon_normal":     "Active recon — httpx, nmap top-1000, web crawl, tech fingerprint",
-            "recon_depth":      "Deep recon — masscan, nuclei, ffuf, JS analysis, secret scanning",
-            "intel_enrich":     "CVE lookup, Shodan, AbuseIPDB, AI analysis of findings",
-            "exploit_web":      "Web exploitation — SQLi, XSS, RCE, SSRF, LFI, SSTI, JWT attacks",
-            "exploit_network":  "Network exploitation — SMB, SSL audit, SNMP, RDP, SSH",
-            "exploit_password": "Password attacks — hashcat, john, hydra, medusa",
-            "exploit_post":     "Post-exploitation — linpeas, pspy, chisel tunnels",
-            "report_generate":  "Generate HTML report with all findings, IOCs, kill chain",
-        }
-        return descriptions.get(key, key)
+
+# ─────────────────────────────────────────────────────────────
+# Public entry point
+# ─────────────────────────────────────────────────────────────
+
+def create_plan(
+    objective: str,
+    target: str,
+    recon_data: Optional[Dict] = None,
+    findings: Optional[List[Finding]] = None,
+    logger: Optional[ARDFLogger] = None,
+) -> Plan:
+    """
+    Convenience function to create a plan.
+
+    Args:
+        objective: Natural language objective
+        target: Target domain/IP
+        recon_data: Reconnaissance data for context
+        findings: Existing findings for context
+        logger: ARDFLogger instance
+
+    Returns:
+        Plan object
+    """
+    if logger is None:
+        logger = get_logger("planner")
+    planner = Planner(logger)
+    return planner.generate_plan(objective, target, recon_data, findings)

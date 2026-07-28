@@ -421,6 +421,177 @@ document.querySelectorAll('[data-copy]').forEach(btn => {
 
 class ReportBuilder:
 
+# ── Add to ReportBuilder class ──────────────────────────────
+
+    # ── Bypass Section ─────────────────────────────────────────
+
+    def _bypass_section(self) -> str:
+        """Cloudflare bypass results section."""
+        bypass_report = self.session.dir("bypass") / "bypass_report.json"
+        if not bypass_report.exists():
+            return ""
+
+        try:
+            data = json.loads(bypass_report.read_text())
+        except Exception:
+            return ""
+
+        candidates = data.get("origin_candidates", [])
+        techniques = data.get("techniques", {})
+
+        cards = ""
+        for tech_name, tech_result in techniques.items():
+            success = tech_result.get("success", False)
+            ip = tech_result.get("origin_ip", "N/A")
+            evidence = tech_result.get("evidence", "")
+            status_colour = "#3fb950" if success else "#e74c3c"
+            cards += f"""
+<div class="card" style="border-left:3px solid {status_colour}">
+  <h3 style="margin-top:0">{html.escape(tech_name.replace('_', ' ').title())}</h3>
+  <div style="font-size:12px;color:var(--text-dim)">
+    Status: <span style="color:{status_colour}">{'✅ Success' if success else '❌ Failed'}</span>
+    {' · Origin IP: <code>' + html.escape(ip) + '</code>' if success else ''}
+  </div>
+  <div style="font-size:11px;color:var(--text-dim);margin-top:4px">
+    {html.escape(evidence[:200])}
+  </div>
+</div>"""
+
+        if not cards:
+            return ""
+
+        return f"""
+<section id="bypass">
+  <h2>Cloudflare Bypass
+    <span class="section-count">{len(candidates)} candidates</span>
+  </h2>
+  {cards}
+  {"<div style='margin-top:12px'><strong style='color:var(--accent)'>Origin Candidates:</strong> " + ', '.join('<code>' + html.escape(ip) + '</code>' for ip in candidates[:5]) + "</div>" if candidates else ""}
+</section>"""
+
+    # ── Workflow Section ──────────────────────────────────────
+
+    def _workflow_section(self) -> str:
+        """Workflow execution results section."""
+        workflow_report = self.session.dir("workflow") / "workflow_report.json"
+        if not workflow_report.exists():
+            return ""
+
+        try:
+            data = json.loads(workflow_report.read_text())
+        except Exception:
+            return ""
+
+        steps = data.get("step_results", {})
+        total = data.get("total_steps", 0)
+        completed = data.get("completed_steps", 0)
+        failed = data.get("failed_steps", 0)
+
+        step_html = ""
+        for step_name, step_result in steps.items():
+            status = step_result.get("status", "unknown")
+            colour = "#3fb950" if status == "success" else "#e74c3c"
+            step_html += f"""
+<div class="timeline tl-item" style="margin-bottom:12px">
+  <div class="tl-dot" style="background:{colour}"></div>
+  <div class="tl-title" style="font-size:12px">
+    {html.escape(step_name.replace('_', ' ').title())}
+    <span style="color:{colour};font-weight:400;font-size:11px"> — {status}</span>
+  </div>
+  <div style="font-size:11px;color:var(--text-dim)">
+    {html.escape(str(step_result.get('result', {}))[:200])}
+  </div>
+</div>"""
+
+        return f"""
+<section id="workflow">
+  <h2>Adaptive Workflow
+    <span class="section-count">{completed}/{total} steps</span>
+  </h2>
+  <div class="card">
+    <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px">
+      <div class="stat"><div class="num">{total}</div><div class="lbl">Total Steps</div></div>
+      <div class="stat"><div class="num" style="color:#3fb950">{completed}</div><div class="lbl">Completed</div></div>
+      <div class="stat"><div class="num" style="color:#e74c3c">{failed}</div><div class="lbl">Failed</div></div>
+    </div>
+    <div class="timeline" style="border-left-color:var(--border)">{step_html}</div>
+  </div>
+</section>"""
+
+    # ── Red Team Section ──────────────────────────────────────
+
+    def _redteam_section(self) -> str:
+        """Red team orchestration results section."""
+        redteam_report = self.session.dir("redteam") / "redteam_report.json"
+        if not redteam_report.exists():
+            return ""
+
+        try:
+            data = json.loads(redteam_report.read_text())
+        except Exception:
+            return ""
+
+        vectors_executed = data.get("vectors_executed", 0)
+        successful = data.get("successful", 0)
+        failed = data.get("failed", 0)
+        results = data.get("results", {})
+
+        vector_cards = ""
+        for v_name, v_result in results.items():
+            success = v_result.get("success", False)
+            colour = "#3fb950" if success else "#e74c3c"
+            res_data = v_result.get("result", {})
+            vector_cards += f"""
+<div class="card" style="border-left:3px solid {colour};margin-bottom:10px">
+  <div style="display:flex;justify-content:space-between;align-items:center">
+    <strong>{html.escape(v_name.replace('_', ' ').title())}</strong>
+    <span style="color:{colour};font-size:12px">{'✅ Success' if success else '❌ Failed'}</span>
+  </div>
+  <div style="font-size:11px;color:var(--text-dim);margin-top:4px">
+    {html.escape(str(res_data)[:200])}
+  </div>
+</div>"""
+
+        return f"""
+<section id="redteam">
+  <h2>Red Team Orchestration
+    <span class="section-count">{successful}/{vectors_executed} vectors</span>
+  </h2>
+  <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:16px">
+    <div class="stat"><div class="num">{vectors_executed}</div><div class="lbl">Vectors</div></div>
+    <div class="stat"><div class="num" style="color:#3fb950">{successful}</div><div class="lbl">Succeeded</div></div>
+    <div class="stat"><div class="num" style="color:#e74c3c">{failed}</div><div class="lbl">Failed</div></div>
+  </div>
+  {vector_cards}
+</section>"""
+
+
+# ── Update the build() method ──────────────────────────────────
+
+# In the build() method, add these sections to the sections list:
+
+def build(self) -> str:
+    # ... existing code ...
+
+    sections = "\n".join(filter(None, [
+        self._exec_summary(),
+        self._attack_surface(),
+        self._bypass_section(),          # NEW
+        self._workflow_section(),        # NEW
+        self._redteam_section(),         # NEW
+        self._findings_table(),
+        self._attack_chains(),
+        self._kill_chain(),
+        self._ioc_section(),
+        self._mitre_section(),
+        self._remediation_plan(),
+        self._sigma_section() if self.purple_mode else "",
+        self._appendix(),
+    ]))
+
+    # ... rest of build method ...
+
+
     def __init__(
         self,
         session:      Session,

@@ -1,291 +1,369 @@
 """
 core/mission.py
-────────────────
-Mission — the top-level unit of work in ARDF.
+───────────────
+Mission definition and playbook loader for ARDF.
 
-A mission wraps a session and owns the full lifecycle:
-  created → planned → running → paused → completed | failed
+Enhanced with workflow playbooks:
+  - Load YAML playbooks with workflow definitions
+  - Support conditional branching based on findings
+  - Define confirmation tiers per phase
+  - Handle Cloudflare-specific playbooks
+  - Support adaptive playbook selection
 
-Each mission has one objective, one target, one mode,
-and an ordered task list produced by the planner.
+Playbook format:
+  phases:
+    - name: recon
+      module: recon
+      depth: normal
+      condition: always
+      confirmation_tier: 1
+
+    - name: bypass
+      module: bypass
+      condition: cloudflare_detected
+      confirmation_tier: 2
 """
 
 import json
-import time
-import uuid
-from datetime import datetime
-from enum     import Enum
-from pathlib  import Path
-from typing   import Any, Dict, List, Optional
+import yaml
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Set
+from dataclasses import dataclass, field
 
-from modules.session import Session, SessionStatus
-from modules.logger  import get_logger, ARDFLogger
+from modules.logger import get_logger, ARDFLogger
+from modules.session import Session
 
 
 # ─────────────────────────────────────────────────────────────
-# Mission status
+# Data Structures
 # ─────────────────────────────────────────────────────────────
 
-class MissionStatus(str, Enum):
-    CREATED   = "created"
-    PLANNED   = "planned"
-    RUNNING   = "running"
-    PAUSED    = "paused"
-    COMPLETED = "completed"
-    FAILED    = "failed"
-    ABORTED   = "aborted"
+@dataclass
+class MissionPhase:
+    """A single phase in a mission playbook."""
+    name: str
+    module: str
+    action: str
+    params: Dict[str, Any] = field(default_factory=dict)
+    condition: str = "always"
+    confirmation_tier: int = 1
+    depends_on: List[str] = field(default_factory=list)
+    critical: bool = False
+    retry_count: int = 0
+    timeout: int = 3600
+
+
+@dataclass
+class MissionPlaybook:
+    """Complete mission playbook definition."""
+    name: str
+    description: str
+    version: str = "1.0"
+    target_type: str = "any"
+    execution_mode: str = "red"
+    phases: List[MissionPhase] = field(default_factory=list)
+    variables: Dict[str, Any] = field(default_factory=dict)
+    fallback_playbook: Optional[str] = None
 
 
 # ─────────────────────────────────────────────────────────────
-# Mission
+# Mission Loader
 # ─────────────────────────────────────────────────────────────
 
-class Mission:
+class MissionLoader:
     """
-    Top-level mission container.
+    Load and validate mission playbooks.
+    """
 
-    Wraps a Session and adds:
-      - Objective tracking
-      - Task plan storage
-      - Lifecycle state machine
-      - Execution metrics
-      - Pause / resume support
+    def __init__(self, logger: Optional[ARDFLogger] = None):
+        self.logger = logger or get_logger("mission")
+        self.playbook_dir = Path("config/playbooks")
+        self._cache: Dict[str, MissionPlaybook] = {}
+
+    def load_playbook(self, name: str) -> Optional[MissionPlaybook]:
+        """
+        Load a playbook by name from config/playbooks/.
+        """
+        if name in self._cache:
+            return self._cache[name]
+
+        # Try multiple paths
+        paths = [
+            self.playbook_dir / f"{name}.yaml",
+            self.playbook_dir / f"{name}.yml",
+            Path(f"config/playbooks/{name}.yaml"),
+            Path(f"config/playbooks/{name}.yml"),
+        ]
+
+        for path in paths:
+            if path.exists():
+                try:
+                    data = yaml.safe_load(path.read_text())
+                    playbook = self._parse_playbook(data, name)
+                    self._cache[name] = playbook
+                    self.logger.success(f"Loaded playbook: {name} ({len(playbook.phases)} phases)")
+                    return playbook
+                except Exception as e:
+                    self.logger.error(f"Failed to load playbook {name}: {e}")
+                    return None
+
+        self.logger.warning(f"Playbook not found: {name}")
+        return None
+
+    def _parse_playbook(self, data: Dict, name: str) -> MissionPlaybook:
+        """Parse YAML data into MissionPlaybook."""
+        phases = []
+        for phase_data in data.get("phases", []):
+            phases.append(MissionPhase(
+                name=phase_data.get("name", "unknown"),
+                module=phase_data.get("module", ""),
+                action=phase_data.get("action", ""),
+                params=phase_data.get("params", {}),
+                condition=phase_data.get("condition", "always"),
+                confirmation_tier=phase_data.get("confirmation_tier", 1),
+                depends_on=phase_data.get("depends_on", []),
+                critical=phase_data.get("critical", False),
+                retry_count=phase_data.get("retry_count", 0),
+                timeout=phase_data.get("timeout", 3600)
+            ))
+
+        return MissionPlaybook(
+            name=data.get("name", name),
+            description=data.get("description", ""),
+            version=data.get("version", "1.0"),
+            target_type=data.get("target_type", "any"),
+            execution_mode=data.get("execution_mode", "red"),
+            phases=phases,
+            variables=data.get("variables", {}),
+            fallback_playbook=data.get("fallback_playbook")
+        )
+
+    def list_playbooks(self) -> List[str]:
+        """List all available playbooks."""
+        playbooks = []
+        for path in self.playbook_dir.glob("*.yaml"):
+            playbooks.append(path.stem)
+        for path in self.playbook_dir.glob("*.yml"):
+            if path.stem not in playbooks:
+                playbooks.append(path.stem)
+        return sorted(playbooks)
+
+    def create_playbook_from_workflow(self, workflow_data: Dict) -> MissionPlaybook:
+        """
+        Create a playbook from workflow execution results.
+        Useful for capturing successful workflows.
+        """
+        name = workflow_data.get("name", f"workflow_{int(time.time())}")
+        phases = []
+
+        for step in workflow_data.get("steps", []):
+            phases.append(MissionPhase(
+                name=step.get("name", "unknown"),
+                module=step.get("module", ""),
+                action=step.get("action", ""),
+                params=step.get("params", {}),
+                condition=step.get("condition", "always"),
+                confirmation_tier=step.get("confirmation_tier", 1),
+                critical=step.get("critical", False)
+            ))
+
+        return MissionPlaybook(
+            name=name,
+            description=f"Generated from workflow: {workflow_data.get('description', '')}",
+            phases=phases,
+            variables=workflow_data.get("variables", {})
+        )
+
+
+# ─────────────────────────────────────────────────────────────
+# Mission Executor
+# ─────────────────────────────────────────────────────────────
+
+class MissionExecutor:
+    """
+    Execute mission playbooks with dynamic branching.
     """
 
     def __init__(
         self,
-        session:   Session,
-        objective: str,
-        mode:      str = "red",
-        logger:    Optional[ARDFLogger] = None,
+        session: Session,
+        playbook: MissionPlaybook,
+        logger: Optional[ARDFLogger] = None,
+        context: Optional[Dict] = None
     ):
-        self.session        = session
-        self.objective      = objective
-        self.mode           = mode
-        self.logger         = logger or get_logger("core.mission")
-        self.mission_id     = f"mission_{uuid.uuid4().hex[:8]}"
-        self.status         = MissionStatus.CREATED
-        self.plan:          Optional[Dict]  = None
-        self.current_task:  Optional[str]   = None
-        self.completed_tasks: List[str]     = []
-        self.failed_tasks:    List[str]     = []
-        self.skipped_tasks:   List[str]     = []
-        self.start_time:    Optional[float] = None
-        self.end_time:      Optional[float] = None
-        self.metrics:       Dict[str, Any]  = {}
-        self._pause_flag:   bool            = False
-        self._abort_flag:   bool            = False
+        self.session = session
+        self.playbook = playbook
+        self.logger = logger or get_logger("mission")
+        self.context = context or {}
+        self.results = {}
+        self.completed_phases = []
+        self.failed_phases = []
 
-    # ── Lifecycle ─────────────────────────────────────────────
-
-    def set_plan(self, plan: Dict):
-        """Attach a task plan produced by MissionPlanner."""
-        self.plan   = plan
-        self.status = MissionStatus.PLANNED
-        self.logger.success(
-            f"Mission {self.mission_id} planned | "
-            f"tasks={len(plan.get('tasks', []))} | "
-            f"mode={self.mode}"
-        )
-
-    def start(self):
-        """Mark mission as running."""
-        self.status     = MissionStatus.RUNNING
-        self.start_time = time.time()
-        self.session.set_status(SessionStatus.RUNNING)
-        self.logger.info(
-            f"Mission {self.mission_id} started | "
-            f"target={self.session.meta.target} | "
-            f"objective={self.objective[:60]}"
-        )
-
-    def pause(self):
-        """Request a pause after the current task completes."""
-        self._pause_flag = True
-        self.status      = MissionStatus.PAUSED
-        self.session.set_status(SessionStatus.PAUSED)
-        self.logger.warning(f"Mission {self.mission_id} paused")
-
-    def resume(self):
-        """Resume from pause."""
-        self._pause_flag = False
-        self.status      = MissionStatus.RUNNING
-        self.session.set_status(SessionStatus.RUNNING)
-        self.logger.info(f"Mission {self.mission_id} resumed")
-
-    def abort(self, reason: str = ""):
-        """Abort the mission immediately."""
-        self._abort_flag = True
-        self.status      = MissionStatus.ABORTED
-        self.end_time    = time.time()
-        self.session.set_status(SessionStatus.FAILED)
-        self.logger.error(
-            f"Mission {self.mission_id} aborted"
-            + (f": {reason}" if reason else "")
-        )
-
-    def complete(self):
-        """Mark mission as successfully completed."""
-        self.status   = MissionStatus.COMPLETED
-        self.end_time = time.time()
-        self.session.set_status(SessionStatus.COMPLETED)
-        self._compute_metrics()
-        self.logger.success(
-            f"Mission {self.mission_id} completed | "
-            f"duration={self.duration_str()} | "
-            f"findings={self.session.meta.findings_count} | "
-            f"risk={self.session.meta.risk_score}"
-        )
-
-    def fail(self, reason: str = ""):
-        """Mark mission as failed."""
-        self.status   = MissionStatus.FAILED
-        self.end_time = time.time()
-        self.session.set_status(SessionStatus.FAILED)
-        self.logger.error(
-            f"Mission {self.mission_id} failed"
-            + (f": {reason}" if reason else "")
-        )
-
-    # ── Task tracking ─────────────────────────────────────────
-
-    def mark_task_running(self, task_id: str):
-        self.current_task = task_id
-        self.logger.info(f"Task running: {task_id}")
-
-    def mark_task_complete(self, task_id: str):
-        if task_id not in self.completed_tasks:
-            self.completed_tasks.append(task_id)
-        self.current_task = None
-        self.logger.success(f"Task complete: {task_id}")
-
-    def mark_task_failed(self, task_id: str, reason: str = ""):
-        if task_id not in self.failed_tasks:
-            self.failed_tasks.append(task_id)
-        self.current_task = None
-        self.logger.error(
-            f"Task failed: {task_id}"
-            + (f" — {reason}" if reason else "")
-        )
-
-    def mark_task_skipped(self, task_id: str, reason: str = ""):
-        if task_id not in self.skipped_tasks:
-            self.skipped_tasks.append(task_id)
-        self.logger.warning(
-            f"Task skipped: {task_id}"
-            + (f" — {reason}" if reason else "")
-        )
-
-    # ── State checks ──────────────────────────────────────────
-
-    @property
-    def should_pause(self) -> bool:
-        return self._pause_flag
-
-    @property
-    def should_abort(self) -> bool:
-        return self._abort_flag
-
-    @property
-    def is_active(self) -> bool:
-        return self.status in (MissionStatus.RUNNING, MissionStatus.PLANNED)
-
-    @property
-    def remaining_tasks(self) -> List[Dict]:
-        if not self.plan:
-            return []
-        done = set(self.completed_tasks + self.failed_tasks + self.skipped_tasks)
-        return [
-            t for t in self.plan.get("tasks", [])
-            if t["id"] not in done
-        ]
-
-    def task_by_id(self, task_id: str) -> Optional[Dict]:
-        if not self.plan:
-            return None
-        for task in self.plan.get("tasks", []):
-            if task["id"] == task_id:
-                return task
-        return None
-
-    def all_tasks_done(self) -> bool:
-        if not self.plan:
+    def evaluate_condition(self, condition: str) -> bool:
+        """Evaluate a phase condition."""
+        if condition == "always":
             return True
-        total = len(self.plan.get("tasks", []))
-        done  = (
-            len(self.completed_tasks) +
-            len(self.failed_tasks) +
-            len(self.skipped_tasks)
-        )
-        return done >= total
+        if condition == "never":
+            return False
 
-    # ── Metrics ───────────────────────────────────────────────
+        # Cloudflare conditions
+        if condition == "cloudflare_detected":
+            # Check recon data for Cloudflare
+            recon_path = self.session.dir("recon") / "recon_passive_summary.json"
+            if recon_path.exists():
+                try:
+                    data = json.loads(recon_path.read_text())
+                    return data.get("cloudflare", {}).get("detected", False)
+                except Exception:
+                    pass
+            return False
 
-    def _compute_metrics(self):
-        """Compute final mission metrics."""
-        duration = (
-            self.end_time - self.start_time
-            if self.start_time and self.end_time
-            else 0
-        )
-        findings = self.session.get_findings()
-        self.metrics = {
-            "duration_seconds":  round(duration, 2),
-            "total_findings":    len(findings),
-            "critical_findings": sum(1 for f in findings if f.severity.value == "critical"),
-            "high_findings":     sum(1 for f in findings if f.severity.value == "high"),
-            "risk_score":        self.session.meta.risk_score,
-            "tasks_completed":   len(self.completed_tasks),
-            "tasks_failed":      len(self.failed_tasks),
-            "tasks_skipped":     len(self.skipped_tasks),
-            "modules_run":       self.session.meta.modules_done,
-        }
+        if condition == "bypass_succeeded":
+            bypass_path = self.session.dir("bypass") / "bypass_report.json"
+            if bypass_path.exists():
+                try:
+                    data = json.loads(bypass_path.read_text())
+                    return data.get("bypass_achieved", False)
+                except Exception:
+                    pass
+            return False
 
-    def duration_str(self) -> str:
-        if not self.start_time:
-            return "0s"
-        elapsed = (self.end_time or time.time()) - self.start_time
-        if elapsed < 60:
-            return f"{elapsed:.0f}s"
-        if elapsed < 3600:
-            return f"{elapsed/60:.1f}m"
-        return f"{elapsed/3600:.1f}h"
+        if condition == "origin_known":
+            bypass_path = self.session.dir("bypass") / "bypass_report.json"
+            if bypass_path.exists():
+                try:
+                    data = json.loads(bypass_path.read_text())
+                    return bool(data.get("origin_candidates"))
+                except Exception:
+                    pass
+            return False
 
-    # ── Serialisation ─────────────────────────────────────────
+        # Generic condition check from context
+        if condition.startswith("ctx."):
+            key = condition[4:]
+            return self.context.get(key, False)
 
-    def to_dict(self) -> Dict:
+        return True
+
+    def execute_phase(self, phase: MissionPhase) -> Dict:
+        """Execute a single mission phase."""
+        self.logger.info(f"Executing phase: {phase.name} ({phase.module}.{phase.action})")
+
+        # Check condition
+        if not self.evaluate_condition(phase.condition):
+            self.logger.info(f"Skipping phase {phase.name} (condition not met)")
+            return {"status": "skipped", "reason": f"condition: {phase.condition}"}
+
+        # Dynamic module import
+        try:
+            module = __import__(f"modules.{phase.module}", fromlist=[""])
+            func = getattr(module, phase.action)
+        except (ImportError, AttributeError) as e:
+            self.logger.error(f"Module/action not found: {phase.module}.{phase.action}")
+            return {"status": "failed", "error": str(e)}
+
+        # Execute with retry
+        for attempt in range(phase.retry_count + 1):
+            try:
+                # Build params with context
+                params = phase.params.copy()
+                params["session"] = self.session
+                params["logger"] = self.logger
+
+                # Add context variables
+                for key, value in self.context.items():
+                    if key not in params:
+                        params[key] = value
+
+                result = func(**params)
+                return {"status": "success", "result": result}
+            except Exception as e:
+                self.logger.warning(f"Attempt {attempt + 1} failed: {e}")
+                if attempt == phase.retry_count:
+                    return {"status": "failed", "error": str(e)}
+
+        return {"status": "failed", "error": "Max retries exceeded"}
+
+    def execute(self) -> Dict[str, Any]:
+        """
+        Execute all phases in the playbook.
+        """
+        self.logger.banner(f"MISSION: {self.playbook.name}", style="bold blue")
+
+        # Phase 1: Validate dependencies
+        phase_names = {p.name for p in self.playbook.phases}
+        for phase in self.playbook.phases:
+            for dep in phase.depends_on:
+                if dep not in phase_names:
+                    self.logger.warning(f"Phase {phase.name} depends on missing phase: {dep}")
+
+        # Execute phases in order
+        for phase in self.playbook.phases:
+            # Skip if already completed
+            if phase.name in self.completed_phases:
+                continue
+
+            # Check dependencies
+            for dep in phase.depends_on:
+                if dep not in self.completed_phases:
+                    self.logger.warning(f"Phase {phase.name} waiting for dependency: {dep}")
+                    continue
+
+            result = self.execute_phase(phase)
+            self.results[phase.name] = result
+
+            if result["status"] == "success":
+                self.completed_phases.append(phase.name)
+                # Update context with results
+                if result.get("result"):
+                    self.context[phase.name] = result["result"]
+            else:
+                self.failed_phases.append(phase.name)
+                if phase.critical:
+                    self.logger.error(f"Critical phase failed: {phase.name}")
+                    break
+
+        # Return summary
         return {
-            "mission_id":       self.mission_id,
-            "session_id":       self.session.meta.session_id,
-            "objective":        self.objective,
-            "mode":             self.mode,
-            "target":           self.session.meta.target,
-            "status":           self.status.value,
-            "start_time":       self.start_time,
-            "end_time":         self.end_time,
-            "duration":         self.duration_str(),
-            "tasks_completed":  self.completed_tasks,
-            "tasks_failed":     self.failed_tasks,
-            "tasks_skipped":    self.skipped_tasks,
-            "current_task":     self.current_task,
-            "remaining_tasks":  len(self.remaining_tasks),
-            "metrics":          self.metrics,
+            "playbook": self.playbook.name,
+            "total_phases": len(self.playbook.phases),
+            "completed": len(self.completed_phases),
+            "failed": len(self.failed_phases),
+            "results": self.results,
+            "context": self.context
         }
 
-    def save(self, output_dir: Optional[Path] = None):
-        """Persist mission state to disk."""
-        out = output_dir or self.session.dir("logs")
-        out.mkdir(parents=True, exist_ok=True)
-        path = out / f"mission_{self.mission_id}.json"
-        path.write_text(
-            json.dumps(self.to_dict(), indent=2, default=str),
-            encoding="utf-8",
-        )
 
-    def __repr__(self) -> str:
-        return (
-            f"<Mission id={self.mission_id} "
-            f"status={self.status.value} "
-            f"target={self.session.meta.target} "
-            f"tasks={len(self.completed_tasks)}/{len(self.plan.get('tasks',[]) if self.plan else [])}>"
-        )
+# ─────────────────────────────────────────────────────────────
+# Public entry point
+# ─────────────────────────────────────────────────────────────
+
+def run_mission(
+    session: Session,
+    playbook_name: str,
+    logger: Optional[ARDFLogger] = None,
+    context: Optional[Dict] = None,
+) -> Dict[str, Any]:
+    """
+    Run a mission playbook.
+
+    Args:
+        session: Active ARDF session
+        playbook_name: Name of playbook to run
+        logger: ARDFLogger instance
+        context: Additional context variables
+
+    Returns:
+        Mission execution results
+    """
+    if logger is None:
+        logger = get_logger("mission")
+
+    loader = MissionLoader(logger)
+    playbook = loader.load_playbook(playbook_name)
+
+    if not playbook:
+        return {"status": "failed", "error": f"Playbook not found: {playbook_name}"}
+
+    executor = MissionExecutor(session, playbook, logger, context or {})
+    return executor.execute()

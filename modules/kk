@@ -1,0 +1,53 @@
+ardf/
+├── modules/
+│   ├── recon.py              # ENHANCED: Deep OSINT + Cloudflare detection
+│   ├── exploit.py            # ENHANCED: Adaptive workflow + multi-vector
+│   ├── intel.py              # ENHANCED: CVE matching + origin IP discovery
+│   ├── bypass.py             # NEW: Cloudflare bypass (single file)
+│   ├── workflow.py           # NEW: Adaptive workflow engine (single file)
+│   ├── redteam.py            # NEW: Red team orchestration (single file)
+│   ├── session.py            # UNCHANGED
+│   ├── logger.py             # UNCHANGED
+│   └── report.py             # ENHANCED: Include workflow decisions
+│
+├── ai/
+│   ├── local_model.py        # UNCHANGED
+│   ├── planner.py            # ENHANCED: Plan with Cloudflare in mind
+│   ├── analyst.py            # ENHANCED: Interpret CF findings
+│   ├── tactician.py          # ENHANCED: Suggest bypass when CF detected
+│   └── prompts/
+│       ├── bypass.txt        # NEW: Prompt for CF bypass decision
+│       └── workflow.txt      # NEW: Prompt for workflow selection
+│
+├── core/
+│   ├── orchestrator.py       # ENHANCED: Handle workflow states
+│   ├── mission.py            # ENHANCED: Load workflow playbooks
+│   ├── task_graph.py         # ENHANCED: Dynamic branching
+│   ├── confirmation_gate.py  # UNCHANGED
+│   └── response_classifier.py # ENHANCED: Classify CF responses
+│
+├── config/
+│   ├── ardf.yaml             # ENHANCED: Add bypass/workflow settings
+│   ├── playbooks/
+│   │   ├── full.yaml         # UNCHANGED
+│   │   ├── passive.yaml      # UNCHANGED
+│   │   ├── web.yaml          # UNCHANGED
+│   │   ├── purple.yaml       # UNCHANGED
+│   │   ├── cloudflare.yaml   # NEW: CF bypass playbook
+│   │   └── adaptive.yaml     # NEW: Adaptive red team playbook
+│   └── bypass.yaml           # NEW: Bypass technique config
+│
+├── interface/
+│   ├── chat.py               # ENHANCED: Support bypass/workflow commands
+│   ├── banner.py             # UNCHANGED
+│   └── progress.py           # ENHANCED: Show workflow state
+│
+├── daemon/
+│   ├── monitor_daemon.py     # UNCHANGED
+│   ├── scheduler.py          # UNCHANGED
+│   └── alerter.py            # ENHANCED: Alert on CF blocks
+│
+└── graph/
+    ├── finding_graph.py      # UNCHANGED
+    ├── attack_path.py        # ENHANCED: Include CF bypass paths
+    └── kill_chain_mapper.py  # UNCHANGED

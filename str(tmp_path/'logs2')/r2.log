@@ -1,0 +1,73 @@
+2026-07-24 13:07:08 | INFO     | ardf.setup           | Logging initialised | session=r2 | log=str(tmp_path/'logs2')/r2.log | jsonl=str(tmp_path/'logs2')/r2.jsonl
+2026-07-24 13:07:08 | SUCCESS  | ardf.graph.findings  | ✔  Finding graph built | nodes=4 edges=3
+2026-07-24 13:07:08 | SUCCESS  | ardf.graph.findings  | ✔  Finding graph built | nodes=4 edges=3
+2026-07-24 13:07:08 | SUCCESS  | ardf.graph.findings  | ✔  Finding graph built | nodes=4 edges=3
+2026-07-24 13:07:08 | SUCCESS  | ardf.graph.findings  | ✔  Finding graph built | nodes=4 edges=3
+2026-07-24 13:07:08 | SUCCESS  | ardf.graph.findings  | ✔  Finding graph built | nodes=4 edges=3
+2026-07-24 13:07:08 | SUCCESS  | ardf.defense.sigma   | ✔  Generated 2 Sigma rules from 2 findings
+2026-07-24 13:07:08 | SUCCESS  | ardf.defense.sigma   | ✔  Generated 2 Sigma rules from 2 findings
+2026-07-24 13:07:08 | SUCCESS  | ardf.defense.sigma   | ✔  Generated 2 Sigma rules from 2 findings
+2026-07-24 13:07:08 | SUCCESS  | ardf.defense.sigma   | ✔  Generated 2 Sigma rules from 2 findings
+2026-07-24 13:07:08 | SUCCESS  | ardf.defense.sigma   | ✔  Saved 2 Sigma rules to /tmp/pytest-of-codespace/pytest-0/test_saves_rules_to_disk0/sigma_out
+2026-07-24 13:07:08 | SUCCESS  | ardf.defense.sigma   | ✔  Generated 2 Sigma rules from 3 findings
+2026-07-24 13:07:08 | SUCCESS  | ardf.defense.remediation | ✔  Remediation plan saved → /tmp/pytest-of-codespace/pytest-0/test_builds_remediation_plan0/sessions/rem_test/report/remediation (2 items)
+2026-07-24 13:07:08 | SUCCESS  | ardf.defense.remediation | ✔  Remediation plan saved → /tmp/pytest-of-codespace/pytest-0/test_items_sorted_by_severity0/sessions/rem_test/report/remediation (2 items)
+2026-07-24 13:07:08 | SUCCESS  | ardf.defense.remediation | ✔  Remediation plan saved → /tmp/pytest-of-codespace/pytest-0/test_each_item_has_steps0/sessions/rem_test/report/remediation (2 items)
+2026-07-24 13:07:08 | SUCCESS  | ardf.defense.remediation | ✔  Remediation plan saved → /tmp/pytest-of-codespace/pytest-0/test_saves_markdown_and_json0/sessions/rem_test/report/remediation (2 items)
+2026-07-24 13:07:08 | SUCCESS  | ardf.defense.remediation | ✔  Remediation plan saved → /tmp/pytest-of-codespace/pytest-0/test_cve_included_in_item0/sessions/rem_test/report/remediation (2 items)
+2026-07-24 13:07:08 | INFO     | ardf.core.task_graph | Task graph built | tasks=2 | ready=1
+2026-07-24 13:07:08 | INFO     | ardf.core.task_graph | Task graph built | tasks=2 | ready=1
+2026-07-24 13:07:08 | INFO     | ardf.core.task_graph | Task graph built | tasks=1 | ready=1
+2026-07-24 13:07:08 | INFO     | ardf.core.task_graph | Task graph built | tasks=2 | ready=1
+2026-07-24 13:07:08 | ERROR    | ardf.core.task_graph | Circular dependencies detected: ['t1', 't2']
+2026-07-24 13:07:08 | INFO     | ardf.core.task_graph | Task graph built | tasks=1 | ready=1
+2026-07-24 13:07:08 | INFO     | ardf.core.task_graph | Task graph built | tasks=2 | ready=2
+2026-07-24 13:07:08 | WARNING  | ardf.core.task_graph | Task t1 depends on unknown task nonexistent — removing dependency
+2026-07-24 13:07:08 | INFO     | ardf.core.task_graph | Task graph built | tasks=1 | ready=1
+2026-07-24 13:07:08 | WARNING  | ardf.core.gate       | ConfirmationGate: AUTO-APPROVE enabled — all gates will be passed automatically. This mode is intended for authorised automated testing only.
+2026-07-24 13:07:08 | WARNING  | ardf.core.gate       | Gate AUTO-APPROVED for task: Test Task (auto_approve=True)
+2026-07-24 13:07:08 | SUCCESS  | ardf.core.gate       | ✔  Gate APPROVED | task=Test Task | target=example.com | tier=2 | method=auto_approve
+2026-07-24 13:07:08 | WARNING  | ardf.core.gate       | Gate DECLINED for task: Test Task (non_interactive=True, no auto_approve)
+2026-07-24 13:07:08 | WARNING  | ardf.core.gate       | Gate DECLINED | task=Test Task | target=example.com | tier=2 | method=non_interactive_decline
+2026-07-24 13:07:08 | WARNING  | ardf.core.gate       | ConfirmationGate: AUTO-APPROVE enabled — all gates will be passed automatically. This mode is intended for authorised automated testing only.
+2026-07-24 13:07:08 | WARNING  | ardf.core.gate       | Gate AUTO-APPROVED for task: Task One (auto_approve=True)
+2026-07-24 13:07:08 | SUCCESS  | ardf.core.gate       | ✔  Gate APPROVED | task=Task One | target=example.com | tier=2 | method=auto_approve
+2026-07-24 13:07:08 | WARNING  | ardf.core.gate       | Gate AUTO-APPROVED for task: Task Two (auto_approve=True)
+2026-07-24 13:07:08 | SUCCESS  | ardf.core.gate       | ✔  Gate APPROVED | task=Task Two | target=example.com | tier=3 | method=auto_approve
+2026-07-24 13:07:08 | WARNING  | ardf.core.gate       | ConfirmationGate: AUTO-APPROVE enabled — all gates will be passed automatically. This mode is intended for authorised automated testing only.
+2026-07-24 13:07:08 | WARNING  | ardf.core.gate       | Gate AUTO-APPROVED for task: Test (auto_approve=True)
+2026-07-24 13:07:08 | SUCCESS  | ardf.core.gate       | ✔  Gate APPROVED | task=Test | target=example.com | tier=2 | method=auto_approve
+2026-07-24 13:07:08 | INFO     | ardf.core.gate       | Confirmation audit log saved → /tmp/pytest-of-codespace/pytest-0/test_audit_log_saves_to_file0/gate_audit.json
+2026-07-24 13:07:08 | WARNING  | ardf.core.gate       | Gate DECLINED for task: Task (non_interactive=True, no auto_approve)
+2026-07-24 13:07:08 | WARNING  | ardf.core.gate       | Gate DECLINED | task=Task | target=example.com | tier=2 | method=non_interactive_decline
+2026-07-24 13:07:08 | SUCCESS  | ardf.core.mission    | ✔  Mission mission_dfda4253 planned | tasks=1 | mode=red
+2026-07-24 13:07:08 | SUCCESS  | ardf.core.mission    | ✔  Mission mission_a29fac97 planned | tasks=0 | mode=red
+2026-07-24 13:07:08 | INFO     | ardf.core.mission    | Mission mission_a29fac97 started | target=test.example.com | objective=test
+2026-07-24 13:07:08 | SUCCESS  | ardf.core.mission    | ✔  Mission mission_cb64d707 planned | tasks=0 | mode=red
+2026-07-24 13:07:08 | INFO     | ardf.core.mission    | Mission mission_cb64d707 started | target=test.example.com | objective=test
+2026-07-24 13:07:08 | SUCCESS  | ardf.core.mission    | ✔  Mission mission_cb64d707 completed | duration=0s | findings=0 | risk=0.0
+2026-07-24 13:07:08 | SUCCESS  | ardf.core.mission    | ✔  Mission mission_843dcf9b planned | tasks=0 | mode=red
+2026-07-24 13:07:08 | INFO     | ardf.core.mission    | Mission mission_843dcf9b started | target=test.example.com | objective=test
+2026-07-24 13:07:08 | ERROR    | ardf.core.mission    | Mission mission_843dcf9b aborted: test reason
+2026-07-24 13:07:08 | SUCCESS  | ardf.core.mission    | ✔  Mission mission_6712cc71 planned | tasks=0 | mode=red
+2026-07-24 13:07:08 | INFO     | ardf.core.mission    | Mission mission_6712cc71 started | target=test.example.com | objective=test
+2026-07-24 13:07:08 | WARNING  | ardf.core.mission    | Mission mission_6712cc71 paused
+2026-07-24 13:07:08 | INFO     | ardf.core.mission    | Mission mission_6712cc71 resumed
+2026-07-24 13:07:08 | SUCCESS  | ardf.core.mission    | ✔  Mission mission_bad1fc20 planned | tasks=2 | mode=red
+2026-07-24 13:07:08 | SUCCESS  | ardf.core.mission    | ✔  Task complete: t1
+2026-07-24 13:07:08 | ERROR    | ardf.core.mission    | Task failed: t2 — timeout
+2026-07-24 13:07:08 | SUCCESS  | ardf.core.mission    | ✔  Mission mission_153e370c planned | tasks=0 | mode=red
+2026-07-24 13:07:08 | INFO     | ardf.core.mission    | Mission mission_153e370c started | target=test.example.com | objective=test
+2026-07-24 13:07:08 | SUCCESS  | ardf.core.mission    | ✔  Mission mission_7c256f02 planned | tasks=0 | mode=red
+2026-07-24 13:07:08 | INFO     | ardf.ai.model_manager | Ollama not running — attempting to start...
+2026-07-24 13:07:08 | ERROR    | ardf.ai.model_manager | Ollama binary not found. Install from https://ollama.ai
+2026-07-24 13:07:08 | INFO     | ardf.ai.model_manager | Ollama not running — attempting to start...
+2026-07-24 13:07:08 | ERROR    | ardf.ai.model_manager | Ollama binary not found. Install from https://ollama.ai
+2026-07-24 13:07:08 | INFO     | ardf.ai.model_manager | Ollama not running — attempting to start...
+2026-07-24 13:07:08 | ERROR    | ardf.ai.model_manager | Ollama binary not found. Install from https://ollama.ai
+2026-07-24 13:07:08 | INFO     | ardf.ai.model_manager | Ollama not running — attempting to start...
+2026-07-24 13:07:08 | ERROR    | ardf.ai.model_manager | Ollama binary not found. Install from https://ollama.ai
+2026-07-24 13:07:08 | INFO     | ardf.ai.model_manager | Ollama not running — attempting to start...
+2026-07-24 13:07:08 | ERROR    | ardf.ai.model_manager | Ollama binary not found. Install from https://ollama.ai
+2026-07-24 13:07:08 | INFO     | ardf.ai.model_manager | Ollama not running — attempting to start...
+2026-07-24 13:07:08 | ERROR    | ardf.ai.model_manager | Ollama binary not found. Install from https://ollama.ai

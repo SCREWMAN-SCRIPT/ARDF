@@ -1,0 +1,1 @@
+{"ts": "2026-07-24T13:07:08.198275+00:00", "level": "INFO", "logger": "ardf.setup", "msg": "Logging initialised | session=r1 | log=str(tmp_path/'logs1')/r1.log | jsonl=str(tmp_path/'logs1')/r1.jsonl"}

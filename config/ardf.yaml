@@ -107,3 +107,8 @@ session:
   keep_last:        20
   auto_archive:     false
   compress_outputs: false
+
+# Network / proxy configuration
+network:
+  proxies: []      # list of proxy URLs, e.g. http://user:pass@1.2.3.4:8080
+  rotate_proxies: false

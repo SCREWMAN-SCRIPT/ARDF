@@ -1,0 +1,1 @@
+2026-07-24 13:07:08 | INFO     | ardf.setup           | Logging initialised | session=r1 | log=str(tmp_path/'logs1')/r1.log | jsonl=str(tmp_path/'logs1')/r1.jsonl

@@ -18,6 +18,7 @@ from typing import Dict, List, Optional, Tuple
 
 from modules.logger import get_logger, ARDFLogger
 from modules.session import Session, Finding, SeverityLevel
+from modules.http_client import fetch
 
 
 class ActiveScanner:
@@ -158,9 +159,10 @@ class ActiveScanner:
 
     def _fetch_url(self, url: str, timeout: int = 5) -> Optional[Dict]:
         """Fetch URL and return basic info."""
-        import requests
         try:
-            response = requests.get(url, timeout=timeout, verify=False, allow_redirects=True)
+            response = fetch(url, timeout=timeout, verify=False)
+            if not response:
+                return None
             title = "No title"
             if "text/html" in response.headers.get("Content-Type", ""):
                 import re
@@ -174,7 +176,7 @@ class ActiveScanner:
                 "title": title,
                 "headers": dict(response.headers)
             }
-        except:
+        except Exception:
             return None
 
     def _detect_tech(self, response: Dict) -> List[str]:

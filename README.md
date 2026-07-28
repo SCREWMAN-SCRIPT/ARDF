@@ -138,6 +138,45 @@ pytest tests/ -v --tb=short
 
 ---
 
+## HTTP client & WAF bypass
+
+ARDF now includes an improved HTTP client used by recon and web modules. Key features:
+
+- Automatic retries and browser-like headers to reduce simple WAF blocks.
+- Cloudscraper fallback for common Cloudflare challenges.
+- Playwright and Selenium headless fallbacks for full JS rendering when required.
+- Proxy support and optional proxy rotation via `config/ardf.yaml` or `ARDF_PROXY` env var.
+- X-Forwarded-For spoofing and cookie handling heuristics (used only when bypassing).
+
+Setup notes:
+
+1. Install Python requirements (includes `cloudscraper`, `selenium`, and `webdriver-manager`):
+
+```bash
+pip install -r requirements.txt
+```
+
+2. For Playwright (recommended for robust JS handling):
+
+```bash
+pip install playwright
+python -m playwright install
+```
+
+3. For Selenium-based fallback (alternative):
+
+```bash
+pip install selenium webdriver-manager
+# It's convenient to run a Chrome-enabled Selenium Docker container instead of
+# managing local drivers: docker run -d -p 4444:4444 selenium/standalone-chrome
+```
+
+4. Configure proxies (optional): edit `config/ardf.yaml` under the `network` section and add `proxies:` and `rotate_proxies: true` if you want rotation.
+
+See `docs/http_client.md` for full details and troubleshooting.
+
+---
+
 ## Execution Modes
 
 | Mode | Description |

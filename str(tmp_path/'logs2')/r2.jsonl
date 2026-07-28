@@ -1,0 +1,73 @@
+{"ts": "2026-07-24T13:07:08.198776+00:00", "level": "INFO", "logger": "ardf.setup", "msg": "Logging initialised | session=r2 | log=str(tmp_path/'logs2')/r2.log | jsonl=str(tmp_path/'logs2')/r2.jsonl"}
+{"ts": "2026-07-24T13:07:08.201696+00:00", "level": "SUCCESS", "logger": "ardf.graph.findings", "msg": "\u2714  Finding graph built | nodes=4 edges=3"}
+{"ts": "2026-07-24T13:07:08.205538+00:00", "level": "SUCCESS", "logger": "ardf.graph.findings", "msg": "\u2714  Finding graph built | nodes=4 edges=3"}
+{"ts": "2026-07-24T13:07:08.208870+00:00", "level": "SUCCESS", "logger": "ardf.graph.findings", "msg": "\u2714  Finding graph built | nodes=4 edges=3"}
+{"ts": "2026-07-24T13:07:08.211987+00:00", "level": "SUCCESS", "logger": "ardf.graph.findings", "msg": "\u2714  Finding graph built | nodes=4 edges=3"}
+{"ts": "2026-07-24T13:07:08.217441+00:00", "level": "SUCCESS", "logger": "ardf.graph.findings", "msg": "\u2714  Finding graph built | nodes=4 edges=3"}
+{"ts": "2026-07-24T13:07:08.237825+00:00", "level": "SUCCESS", "logger": "ardf.defense.sigma", "msg": "\u2714  Generated 2 Sigma rules from 2 findings"}
+{"ts": "2026-07-24T13:07:08.240713+00:00", "level": "SUCCESS", "logger": "ardf.defense.sigma", "msg": "\u2714  Generated 2 Sigma rules from 2 findings"}
+{"ts": "2026-07-24T13:07:08.243094+00:00", "level": "SUCCESS", "logger": "ardf.defense.sigma", "msg": "\u2714  Generated 2 Sigma rules from 2 findings"}
+{"ts": "2026-07-24T13:07:08.246033+00:00", "level": "SUCCESS", "logger": "ardf.defense.sigma", "msg": "\u2714  Generated 2 Sigma rules from 2 findings"}
+{"ts": "2026-07-24T13:07:08.246415+00:00", "level": "SUCCESS", "logger": "ardf.defense.sigma", "msg": "\u2714  Saved 2 Sigma rules to /tmp/pytest-of-codespace/pytest-0/test_saves_rules_to_disk0/sigma_out"}
+{"ts": "2026-07-24T13:07:08.249713+00:00", "level": "SUCCESS", "logger": "ardf.defense.sigma", "msg": "\u2714  Generated 2 Sigma rules from 3 findings"}
+{"ts": "2026-07-24T13:07:08.253665+00:00", "level": "SUCCESS", "logger": "ardf.defense.remediation", "msg": "\u2714  Remediation plan saved \u2192 /tmp/pytest-of-codespace/pytest-0/test_builds_remediation_plan0/sessions/rem_test/report/remediation (2 items)"}
+{"ts": "2026-07-24T13:07:08.256861+00:00", "level": "SUCCESS", "logger": "ardf.defense.remediation", "msg": "\u2714  Remediation plan saved \u2192 /tmp/pytest-of-codespace/pytest-0/test_items_sorted_by_severity0/sessions/rem_test/report/remediation (2 items)"}
+{"ts": "2026-07-24T13:07:08.260362+00:00", "level": "SUCCESS", "logger": "ardf.defense.remediation", "msg": "\u2714  Remediation plan saved \u2192 /tmp/pytest-of-codespace/pytest-0/test_each_item_has_steps0/sessions/rem_test/report/remediation (2 items)"}
+{"ts": "2026-07-24T13:07:08.263040+00:00", "level": "SUCCESS", "logger": "ardf.defense.remediation", "msg": "\u2714  Remediation plan saved \u2192 /tmp/pytest-of-codespace/pytest-0/test_saves_markdown_and_json0/sessions/rem_test/report/remediation (2 items)"}
+{"ts": "2026-07-24T13:07:08.266878+00:00", "level": "SUCCESS", "logger": "ardf.defense.remediation", "msg": "\u2714  Remediation plan saved \u2192 /tmp/pytest-of-codespace/pytest-0/test_cve_included_in_item0/sessions/rem_test/report/remediation (2 items)"}
+{"ts": "2026-07-24T13:07:08.404076+00:00", "level": "INFO", "logger": "ardf.core.task_graph", "msg": "Task graph built | tasks=2 | ready=1"}
+{"ts": "2026-07-24T13:07:08.405257+00:00", "level": "INFO", "logger": "ardf.core.task_graph", "msg": "Task graph built | tasks=2 | ready=1"}
+{"ts": "2026-07-24T13:07:08.406374+00:00", "level": "INFO", "logger": "ardf.core.task_graph", "msg": "Task graph built | tasks=1 | ready=1"}
+{"ts": "2026-07-24T13:07:08.407481+00:00", "level": "INFO", "logger": "ardf.core.task_graph", "msg": "Task graph built | tasks=2 | ready=1"}
+{"ts": "2026-07-24T13:07:08.408541+00:00", "level": "ERROR", "logger": "ardf.core.task_graph", "msg": "Circular dependencies detected: ['t1', 't2']"}
+{"ts": "2026-07-24T13:07:08.409464+00:00", "level": "INFO", "logger": "ardf.core.task_graph", "msg": "Task graph built | tasks=1 | ready=1"}
+{"ts": "2026-07-24T13:07:08.410536+00:00", "level": "INFO", "logger": "ardf.core.task_graph", "msg": "Task graph built | tasks=2 | ready=2"}
+{"ts": "2026-07-24T13:07:08.411580+00:00", "level": "WARNING", "logger": "ardf.core.task_graph", "msg": "Task t1 depends on unknown task nonexistent \u2014 removing dependency"}
+{"ts": "2026-07-24T13:07:08.411762+00:00", "level": "INFO", "logger": "ardf.core.task_graph", "msg": "Task graph built | tasks=1 | ready=1"}
+{"ts": "2026-07-24T13:07:08.483350+00:00", "level": "WARNING", "logger": "ardf.core.gate", "msg": "ConfirmationGate: AUTO-APPROVE enabled \u2014 all gates will be passed automatically. This mode is intended for authorised automated testing only."}
+{"ts": "2026-07-24T13:07:08.484845+00:00", "level": "WARNING", "logger": "ardf.core.gate", "msg": "Gate AUTO-APPROVED for task: Test Task (auto_approve=True)"}
+{"ts": "2026-07-24T13:07:08.484993+00:00", "level": "SUCCESS", "logger": "ardf.core.gate", "msg": "\u2714  Gate APPROVED | task=Test Task | target=example.com | tier=2 | method=auto_approve"}
+{"ts": "2026-07-24T13:07:08.487035+00:00", "level": "WARNING", "logger": "ardf.core.gate", "msg": "Gate DECLINED for task: Test Task (non_interactive=True, no auto_approve)"}
+{"ts": "2026-07-24T13:07:08.487184+00:00", "level": "WARNING", "logger": "ardf.core.gate", "msg": "Gate DECLINED | task=Test Task | target=example.com | tier=2 | method=non_interactive_decline"}
+{"ts": "2026-07-24T13:07:08.488092+00:00", "level": "WARNING", "logger": "ardf.core.gate", "msg": "ConfirmationGate: AUTO-APPROVE enabled \u2014 all gates will be passed automatically. This mode is intended for authorised automated testing only."}
+{"ts": "2026-07-24T13:07:08.488716+00:00", "level": "WARNING", "logger": "ardf.core.gate", "msg": "Gate AUTO-APPROVED for task: Task One (auto_approve=True)"}
+{"ts": "2026-07-24T13:07:08.488828+00:00", "level": "SUCCESS", "logger": "ardf.core.gate", "msg": "\u2714  Gate APPROVED | task=Task One | target=example.com | tier=2 | method=auto_approve"}
+{"ts": "2026-07-24T13:07:08.489328+00:00", "level": "WARNING", "logger": "ardf.core.gate", "msg": "Gate AUTO-APPROVED for task: Task Two (auto_approve=True)"}
+{"ts": "2026-07-24T13:07:08.489428+00:00", "level": "SUCCESS", "logger": "ardf.core.gate", "msg": "\u2714  Gate APPROVED | task=Task Two | target=example.com | tier=3 | method=auto_approve"}
+{"ts": "2026-07-24T13:07:08.490872+00:00", "level": "WARNING", "logger": "ardf.core.gate", "msg": "ConfirmationGate: AUTO-APPROVE enabled \u2014 all gates will be passed automatically. This mode is intended for authorised automated testing only."}
+{"ts": "2026-07-24T13:07:08.491670+00:00", "level": "WARNING", "logger": "ardf.core.gate", "msg": "Gate AUTO-APPROVED for task: Test (auto_approve=True)"}
+{"ts": "2026-07-24T13:07:08.491792+00:00", "level": "SUCCESS", "logger": "ardf.core.gate", "msg": "\u2714  Gate APPROVED | task=Test | target=example.com | tier=2 | method=auto_approve"}
+{"ts": "2026-07-24T13:07:08.492056+00:00", "level": "INFO", "logger": "ardf.core.gate", "msg": "Confirmation audit log saved \u2192 /tmp/pytest-of-codespace/pytest-0/test_audit_log_saves_to_file0/gate_audit.json"}
+{"ts": "2026-07-24T13:07:08.493884+00:00", "level": "WARNING", "logger": "ardf.core.gate", "msg": "Gate DECLINED for task: Task (non_interactive=True, no auto_approve)"}
+{"ts": "2026-07-24T13:07:08.494014+00:00", "level": "WARNING", "logger": "ardf.core.gate", "msg": "Gate DECLINED | task=Task | target=example.com | tier=2 | method=non_interactive_decline"}
+{"ts": "2026-07-24T13:07:08.495615+00:00", "level": "SUCCESS", "logger": "ardf.core.mission", "msg": "\u2714  Mission mission_dfda4253 planned | tasks=1 | mode=red"}
+{"ts": "2026-07-24T13:07:08.496372+00:00", "level": "SUCCESS", "logger": "ardf.core.mission", "msg": "\u2714  Mission mission_a29fac97 planned | tasks=0 | mode=red"}
+{"ts": "2026-07-24T13:07:08.496479+00:00", "level": "INFO", "logger": "ardf.core.mission", "msg": "Mission mission_a29fac97 started | target=test.example.com | objective=test"}
+{"ts": "2026-07-24T13:07:08.497207+00:00", "level": "SUCCESS", "logger": "ardf.core.mission", "msg": "\u2714  Mission mission_cb64d707 planned | tasks=0 | mode=red"}
+{"ts": "2026-07-24T13:07:08.497318+00:00", "level": "INFO", "logger": "ardf.core.mission", "msg": "Mission mission_cb64d707 started | target=test.example.com | objective=test"}
+{"ts": "2026-07-24T13:07:08.497432+00:00", "level": "SUCCESS", "logger": "ardf.core.mission", "msg": "\u2714  Mission mission_cb64d707 completed | duration=0s | findings=0 | risk=0.0"}
+{"ts": "2026-07-24T13:07:08.498263+00:00", "level": "SUCCESS", "logger": "ardf.core.mission", "msg": "\u2714  Mission mission_843dcf9b planned | tasks=0 | mode=red"}
+{"ts": "2026-07-24T13:07:08.498358+00:00", "level": "INFO", "logger": "ardf.core.mission", "msg": "Mission mission_843dcf9b started | target=test.example.com | objective=test"}
+{"ts": "2026-07-24T13:07:08.498442+00:00", "level": "ERROR", "logger": "ardf.core.mission", "msg": "Mission mission_843dcf9b aborted: test reason"}
+{"ts": "2026-07-24T13:07:08.499822+00:00", "level": "SUCCESS", "logger": "ardf.core.mission", "msg": "\u2714  Mission mission_6712cc71 planned | tasks=0 | mode=red"}
+{"ts": "2026-07-24T13:07:08.499923+00:00", "level": "INFO", "logger": "ardf.core.mission", "msg": "Mission mission_6712cc71 started | target=test.example.com | objective=test"}
+{"ts": "2026-07-24T13:07:08.499997+00:00", "level": "WARNING", "logger": "ardf.core.mission", "msg": "Mission mission_6712cc71 paused"}
+{"ts": "2026-07-24T13:07:08.500050+00:00", "level": "INFO", "logger": "ardf.core.mission", "msg": "Mission mission_6712cc71 resumed"}
+{"ts": "2026-07-24T13:07:08.501599+00:00", "level": "SUCCESS", "logger": "ardf.core.mission", "msg": "\u2714  Mission mission_bad1fc20 planned | tasks=2 | mode=red"}
+{"ts": "2026-07-24T13:07:08.502313+00:00", "level": "SUCCESS", "logger": "ardf.core.mission", "msg": "\u2714  Task complete: t1"}
+{"ts": "2026-07-24T13:07:08.502407+00:00", "level": "ERROR", "logger": "ardf.core.mission", "msg": "Task failed: t2 \u2014 timeout"}
+{"ts": "2026-07-24T13:07:08.503506+00:00", "level": "SUCCESS", "logger": "ardf.core.mission", "msg": "\u2714  Mission mission_153e370c planned | tasks=0 | mode=red"}
+{"ts": "2026-07-24T13:07:08.503938+00:00", "level": "INFO", "logger": "ardf.core.mission", "msg": "Mission mission_153e370c started | target=test.example.com | objective=test"}
+{"ts": "2026-07-24T13:07:08.505142+00:00", "level": "SUCCESS", "logger": "ardf.core.mission", "msg": "\u2714  Mission mission_7c256f02 planned | tasks=0 | mode=red"}
+{"ts": "2026-07-24T13:07:08.574056+00:00", "level": "INFO", "logger": "ardf.ai.model_manager", "msg": "Ollama not running \u2014 attempting to start..."}
+{"ts": "2026-07-24T13:07:08.576792+00:00", "level": "ERROR", "logger": "ardf.ai.model_manager", "msg": "Ollama binary not found. Install from https://ollama.ai"}
+{"ts": "2026-07-24T13:07:08.642265+00:00", "level": "INFO", "logger": "ardf.ai.model_manager", "msg": "Ollama not running \u2014 attempting to start..."}
+{"ts": "2026-07-24T13:07:08.643917+00:00", "level": "ERROR", "logger": "ardf.ai.model_manager", "msg": "Ollama binary not found. Install from https://ollama.ai"}
+{"ts": "2026-07-24T13:07:08.715955+00:00", "level": "INFO", "logger": "ardf.ai.model_manager", "msg": "Ollama not running \u2014 attempting to start..."}
+{"ts": "2026-07-24T13:07:08.719141+00:00", "level": "ERROR", "logger": "ardf.ai.model_manager", "msg": "Ollama binary not found. Install from https://ollama.ai"}
+{"ts": "2026-07-24T13:07:08.813335+00:00", "level": "INFO", "logger": "ardf.ai.model_manager", "msg": "Ollama not running \u2014 attempting to start..."}
+{"ts": "2026-07-24T13:07:08.825304+00:00", "level": "ERROR", "logger": "ardf.ai.model_manager", "msg": "Ollama binary not found. Install from https://ollama.ai"}
+{"ts": "2026-07-24T13:07:08.915292+00:00", "level": "INFO", "logger": "ardf.ai.model_manager", "msg": "Ollama not running \u2014 attempting to start..."}
+{"ts": "2026-07-24T13:07:08.922710+00:00", "level": "ERROR", "logger": "ardf.ai.model_manager", "msg": "Ollama binary not found. Install from https://ollama.ai"}
+{"ts": "2026-07-24T13:07:08.990736+00:00", "level": "INFO", "logger": "ardf.ai.model_manager", "msg": "Ollama not running \u2014 attempting to start..."}
+{"ts": "2026-07-24T13:07:08.993786+00:00", "level": "ERROR", "logger": "ardf.ai.model_manager", "msg": "Ollama binary not found. Install from https://ollama.ai"}

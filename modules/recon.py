@@ -38,6 +38,7 @@ from typing  import Any, Dict, List, Optional, Set, Tuple
 
 from modules.logger  import get_logger, ARDFLogger
 from modules.session import Session, Finding, SeverityLevel
+from modules.http_client import fetch
 
 
 # ─────────────────────────────────────────────────────────────
@@ -206,9 +207,10 @@ def _resolve(hostnames: List[str], logger: ARDFLogger) -> List[str]:
 def _fetch_crtsh(domain: str, logger: ARDFLogger) -> List[str]:
     url = f"https://crt.sh/?q=%.{domain}&output=json"
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "ARDF/2.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data  = json.loads(resp.read())
+        resp = fetch(url, timeout=15, verify=True)
+        if not resp:
+            raise Exception("no response")
+        data = resp.json()
         names: Set[str] = set()
         for entry in data:
             for name in entry.get("name_value", "").splitlines():
@@ -227,12 +229,10 @@ def _fetch_securitytrails(domain: str, logger: ARDFLogger) -> List[str]:
         return []
     url = f"https://api.securitytrails.com/v1/domain/{domain}/subdomains"
     try:
-        req = urllib.request.Request(
-            url,
-            headers={"APIKEY": SECURITYTRAILS_KEY, "Accept": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
+        resp = fetch(url, timeout=15, headers={"APIKEY": SECURITYTRAILS_KEY, "Accept": "application/json"}, verify=True)
+        if not resp:
+            raise Exception("no response")
+        data = resp.json()
         subs = [f"{s}.{domain}" for s in data.get("subdomains", [])]
         logger.success(f"SecurityTrails → {len(subs)} subdomains")
         return subs
@@ -246,8 +246,10 @@ def _fetch_c99(domain: str, logger: ARDFLogger) -> List[str]:
         return []
     url = f"https://api.c99.nl/subdomainfinder?key={C99_KEY}&domain={domain}&json"
     try:
-        with urllib.request.urlopen(url, timeout=15) as resp:
-            data = json.loads(resp.read())
+        resp = fetch(url, timeout=15, verify=True)
+        if not resp:
+            raise Exception("no response")
+        data = resp.json()
         subs = [
             s.get("subdomain", "")
             for s in data.get("subdomains", [])

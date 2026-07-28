@@ -17,6 +17,7 @@ from typing import Dict, List, Optional
 
 from modules.logger import get_logger, ARDFLogger
 from modules.session import Session, Finding, SeverityLevel
+from modules.http_client import fetch
 
 
 class WebScanner:
@@ -56,9 +57,9 @@ class WebScanner:
             common = ["admin", "login", "wp-admin", "api", "dashboard", "cms", "upload", "backup", "config", "sql"]
             for path in common:
                 try:
-                    resp = requests.get(f"{url}/{path}", timeout=5, verify=False)
-                    if resp.status_code not in [404, 403]:
-                        results.append({"path": path, "status": resp.status_code, "size": len(resp.text)})
+                    resp = fetch(f"{url}/{path}", timeout=5, verify=False)
+                    if resp and getattr(resp, "status_code", None) not in [404, 403]:
+                        results.append({"path": path, "status": resp.status_code, "size": len(getattr(resp, "text", ""))})
                 except:
                     pass
 

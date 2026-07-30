@@ -3,15 +3,8 @@ core/orchestrator.py
 ────────────────────
 Mission Orchestrator for ARDF.
 
-Enhanced with workflow state management:
-  - Tracks execution state across modules
-  - Handles Cloudflare bypass workflows
-  - Manages dynamic branching based on findings
-  - Integrates with confirmation gates
-  - Supports pause/resume of complex workflows
-
-The orchestrator is the central execution engine that
-coordinates all modules and manages the mission lifecycle.
+Enhanced with new phases for SQL injection and brute-force validation.
+Supports comprehensive workflow execution with phase management.
 """
 
 import json
@@ -45,6 +38,8 @@ class WorkflowPhase(Enum):
     RECONNAISSANCE = "reconnaissance"
     BYPASS = "bypass"
     EXPLOITATION = "exploitation"
+    SQLI_VALIDATION = "sqli_validation"
+    BRUTEFORCE_VALIDATION = "bruteforce_validation"
     POST_EXPLOIT = "post_exploit"
     REPORTING = "reporting"
 
@@ -58,7 +53,7 @@ class WorkflowState:
     completed_tasks: List[str] = field(default_factory=list)
     failed_tasks: List[str] = field(default_factory=list)
     waiting_for: Optional[str] = None
-    bypass_status: str = "not_attempted"  # not_attempted | in_progress | completed | failed
+    bypass_status: str = "not_attempted"
     origin_ip: Optional[str] = None
     waf_type: Optional[str] = None
     cloudflare_version: Optional[str] = None
@@ -67,6 +62,8 @@ class WorkflowState:
     errors: List[str] = field(default_factory=list)
     started_at: Optional[float] = None
     updated_at: Optional[float] = None
+    sqli_findings: List[Dict] = field(default_factory=list)
+    bruteforce_findings: List[Dict] = field(default_factory=list)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -76,6 +73,7 @@ class WorkflowState:
 class Orchestrator:
     """
     Mission orchestrator with workflow state management.
+    Enhanced with SQLi and brute-force phase support.
     """
 
     def __init__(
@@ -114,7 +112,9 @@ class Orchestrator:
                     results=data.get("results", {}),
                     errors=data.get("errors", []),
                     started_at=data.get("started_at"),
-                    updated_at=data.get("updated_at")
+                    updated_at=data.get("updated_at"),
+                    sqli_findings=data.get("sqli_findings", []),
+                    bruteforce_findings=data.get("bruteforce_findings", []),
                 )
             except Exception as e:
                 self.logger.warning(f"Failed to load state: {e}")
@@ -139,7 +139,9 @@ class Orchestrator:
                 "results": self.state.results,
                 "errors": self.state.errors[-100:],
                 "started_at": self.state.started_at,
-                "updated_at": time.time()
+                "updated_at": time.time(),
+                "sqli_findings": self.state.sqli_findings,
+                "bruteforce_findings": self.state.bruteforce_findings,
             }
             self.state_path.write_text(json.dumps(data, indent=2, default=str))
         except Exception as e:
@@ -217,6 +219,10 @@ class Orchestrator:
             result = self._execute_bypass(params or {})
         elif phase == WorkflowPhase.EXPLOITATION:
             result = self._execute_exploitation(params or {})
+        elif phase == WorkflowPhase.SQLI_VALIDATION:
+            result = self._execute_sqli_validation(params or {})
+        elif phase == WorkflowPhase.BRUTEFORCE_VALIDATION:
+            result = self._execute_bruteforce_validation(params or {})
         elif phase == WorkflowPhase.POST_EXPLOIT:
             result = self._execute_post_exploit(params or {})
         elif phase == WorkflowPhase.REPORTING:
@@ -225,33 +231,19 @@ class Orchestrator:
         return result
 
     def _execute_initial(self, params: Dict) -> Dict:
-        """Initial phase: validate and prepare."""
         target = self.session.meta.target
         self.logger.info(f"Initialising workflow for {target}")
-
-        # Check if we have recon data
-        recon_path = self.session.dir("recon") / "recon_passive_summary.json"
-        if recon_path.exists():
-            result = {"status": "completed", "has_recon": True}
-            self.set_phase(WorkflowPhase.RECONNAISSANCE)
-        else:
-            result = {"status": "completed", "has_recon": False}
-            self.set_phase(WorkflowPhase.RECONNAISSANCE)
-
-        return result
+        self.set_phase(WorkflowPhase.RECONNAISSANCE)
+        return {"status": "completed", "has_recon": False}
 
     def _execute_reconnaissance(self, params: Dict) -> Dict:
-        """Reconnaissance phase."""
         depth = params.get("depth", "normal")
         self.logger.info(f"Running reconnaissance at {depth} depth")
 
-        # Check if recon already exists
         recon_path = self.session.dir("recon") / f"recon_{depth}_summary.json"
         if recon_path.exists():
-            self.logger.info("Recon data already exists, loading")
             try:
                 data = json.loads(recon_path.read_text())
-                # Check for Cloudflare in recon data
                 if data.get("cloudflare", {}).get("detected"):
                     self.set_waf_info("cloudflare", data.get("cloudflare", {}).get("version"))
                     self.set_bypass_status("detected")
@@ -262,7 +254,6 @@ class Orchestrator:
             except Exception:
                 pass
 
-        # Execute recon
         from modules.recon import run_recon
         try:
             result = run_recon(
@@ -272,7 +263,6 @@ class Orchestrator:
                 logger=self.logger
             )
 
-            # Check for Cloudflare
             if result.get("cloudflare", {}).get("detected"):
                 self.set_waf_info("cloudflare", result.get("cloudflare", {}).get("version"))
                 self.set_bypass_status("detected")
@@ -286,10 +276,8 @@ class Orchestrator:
             return {"status": "failed", "error": str(e)}
 
     def _execute_bypass(self, params: Dict) -> Dict:
-        """Cloudflare bypass phase."""
         self.logger.info("Executing Cloudflare bypass phase")
 
-        # Check if bypass already done
         bypass_path = self.session.dir("bypass") / "bypass_report.json"
         if bypass_path.exists():
             try:
@@ -301,7 +289,6 @@ class Orchestrator:
             except Exception:
                 pass
 
-        # Execute bypass
         from modules.bypass import run_bypass
         try:
             result = run_bypass(
@@ -323,14 +310,12 @@ class Orchestrator:
             return {"status": "failed", "error": str(e)}
 
     def _execute_exploitation(self, params: Dict) -> Dict:
-        """Exploitation phase."""
         self.logger.info("Executing exploitation phase")
 
         mode = params.get("mode", "full")
         from modules.exploit import run_exploit
 
         try:
-            # Pass recon data if available
             recon_data = None
             recon_path = self.session.dir("recon") / "recon_depth_summary.json"
             if recon_path.exists():
@@ -348,14 +333,92 @@ class Orchestrator:
                 multi_vector_enabled=True
             )
 
-            self.set_phase(WorkflowPhase.POST_EXPLOIT)
+            # Check if SQLi or brute-force findings exist
+            if result.get("sqli", {}).get("confirmed"):
+                self.state.sqli_findings = result.get("sqli", {}).get("confirmed", [])
+                self.set_phase(WorkflowPhase.SQLI_VALIDATION)
+            elif result.get("bruteforce", {}).get("confirmed"):
+                self.state.bruteforce_findings = result.get("bruteforce", {}).get("confirmed", [])
+                self.set_phase(WorkflowPhase.BRUTEFORCE_VALIDATION)
+            else:
+                self.set_phase(WorkflowPhase.POST_EXPLOIT)
+
             return {"status": "completed", "result": result}
         except Exception as e:
             self.logger.error(f"Exploitation failed: {e}")
             return {"status": "failed", "error": str(e)}
 
+    def _execute_sqli_validation(self, params: Dict) -> Dict:
+        """Execute SQL injection validation phase."""
+        self.logger.info("Executing SQL injection validation phase")
+
+        from modules.validate.sqli import SQLiValidator
+
+        try:
+            urls = []
+            for f in self.session.get_findings():
+                if f.evidence and "http" in f.evidence:
+                    urls.append(f.evidence)
+
+            if not urls:
+                urls = [f"https://{self.session.meta.target}"]
+
+            sqli = SQLiValidator(self.session, self.logger)
+            results = {}
+
+            for url in urls[:3]:
+                result = sqli.validate(url)
+                results[url] = result
+
+                if result.get("confirmed"):
+                    for confirmed in result.get("confirmed", []):
+                        self.session.add_finding(Finding(
+                            source="orchestrator.sqli",
+                            title=f"SQL injection confirmed: {confirmed.get('parameter', 'unknown')}",
+                            severity=SeverityLevel.CRITICAL,
+                            host=url,
+                            tags=["sqli", "validated", "orchestrator"],
+                            evidence=json.dumps(confirmed),
+                            remediation="Use parameterized queries. Sanitize all user input.",
+                        ))
+
+            self.set_phase(WorkflowPhase.BRUTEFORCE_VALIDATION)
+            return {"status": "completed", "results": results}
+        except Exception as e:
+            self.logger.error(f"SQLi validation failed: {e}")
+            return {"status": "failed", "error": str(e)}
+
+    def _execute_bruteforce_validation(self, params: Dict) -> Dict:
+        """Execute brute-force validation phase."""
+        self.logger.info("Executing brute-force validation phase")
+
+        from modules.validate.auth import AuthValidator
+
+        try:
+            auth = AuthValidator(self.session, self.logger)
+            result = auth.run(self.session.meta.target)
+
+            if result.get("vulnerabilities"):
+                for vuln in result.get("vulnerabilities", []):
+                    if vuln.get("type") == "default_credentials":
+                        for cred in vuln.get("found", []):
+                            self.session.add_finding(Finding(
+                                source="orchestrator.bruteforce",
+                                title=f"Default credentials found: {cred.get('username', 'unknown')}",
+                                severity=SeverityLevel.CRITICAL,
+                                host=self.session.meta.target,
+                                tags=["bruteforce", "default-creds", "orchestrator"],
+                                evidence=json.dumps(cred),
+                                remediation="Change all default credentials immediately.",
+                            ))
+
+            self.set_phase(WorkflowPhase.POST_EXPLOIT)
+            return {"status": "completed", "result": result}
+        except Exception as e:
+            self.logger.error(f"Brute-force validation failed: {e}")
+            return {"status": "failed", "error": str(e)}
+
     def _execute_post_exploit(self, params: Dict) -> Dict:
-        """Post-exploitation phase."""
         self.logger.info("Executing post-exploitation phase")
 
         from modules.redteam import run_redteam
@@ -375,7 +438,6 @@ class Orchestrator:
             return {"status": "failed", "error": str(e)}
 
     def _execute_reporting(self, params: Dict) -> Dict:
-        """Reporting phase."""
         self.logger.info("Generating reports")
 
         from modules.report import generate_report
@@ -398,9 +460,7 @@ class Orchestrator:
     # ── Full workflow execution ──────────────────────────────
 
     def run_full_workflow(self, params: Dict = None) -> Dict:
-        """
-        Execute full workflow from start to finish.
-        """
+        """Execute full workflow from start to finish."""
         params = params or {}
         self.state.started_at = time.time()
         self.set_status(WorkflowStatus.RUNNING)
@@ -435,38 +495,47 @@ class Orchestrator:
                 {"mode": params.get("exploit_mode", "full")}
             )
 
-        # Phase 5: Post-exploit
+        # Phase 5: SQLi Validation
+        if self.state.phase.value == "sqli_validation":
+            results["phases"]["sqli_validation"] = self.execute_phase(
+                WorkflowPhase.SQLI_VALIDATION,
+                params.get("sqli_params", {})
+            )
+
+        # Phase 6: Brute-Force Validation
+        if self.state.phase.value == "bruteforce_validation":
+            results["phases"]["bruteforce_validation"] = self.execute_phase(
+                WorkflowPhase.BRUTEFORCE_VALIDATION,
+                params.get("bruteforce_params", {})
+            )
+
+        # Phase 7: Post-exploit
         if self.state.phase.value in ["exploitation", "post_exploit"]:
             results["phases"]["post_exploit"] = self.execute_phase(
                 WorkflowPhase.POST_EXPLOIT,
                 params.get("post_exploit_params", {})
             )
 
-        # Phase 6: Reporting
+        # Phase 8: Reporting
         if self.state.phase.value in ["post_exploit", "reporting"]:
             results["phases"]["reporting"] = self.execute_phase(
                 WorkflowPhase.REPORTING,
                 params.get("report_params", {})
             )
 
-        # Final status
         results["final_status"] = self.state.status.value
         results["execution_time"] = time.time() - self.state.started_at
 
-        # Save final state
         self._save_state()
         return results
 
     # ── Resume workflow ──────────────────────────────────────
 
     def resume_workflow(self) -> Dict:
-        """
-        Resume a paused or failed workflow.
-        """
+        """Resume a paused or failed workflow."""
         if self.state.status in (WorkflowStatus.COMPLETED, WorkflowStatus.PAUSED):
             self.set_status(WorkflowStatus.RUNNING)
 
-            # Determine which phase to resume
             phase = self.state.phase
             if phase == WorkflowPhase.INITIAL:
                 return self.execute_phase(phase)
@@ -476,6 +545,10 @@ class Orchestrator:
                 return self.execute_phase(phase)
             elif phase == WorkflowPhase.EXPLOITATION:
                 return self.execute_phase(phase, {"mode": "full"})
+            elif phase == WorkflowPhase.SQLI_VALIDATION:
+                return self.execute_phase(phase)
+            elif phase == WorkflowPhase.BRUTEFORCE_VALIDATION:
+                return self.execute_phase(phase)
             elif phase == WorkflowPhase.POST_EXPLOIT:
                 return self.execute_phase(phase)
             elif phase == WorkflowPhase.REPORTING:
@@ -496,15 +569,6 @@ def run_orchestrator(
 ) -> Dict[str, Any]:
     """
     Run or resume the orchestrator for a session.
-
-    Args:
-        session: Active ARDF session
-        logger: ARDFLogger instance
-        params: Execution parameters
-        resume: Resume existing workflow
-
-    Returns:
-        Orchestration results
     """
     if logger is None:
         logger = get_logger("orchestrator")

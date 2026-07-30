@@ -1,0 +1,92 @@
+name: "Brute-Force Validation"
+description: "Test authentication systems with brute-force attacks"
+version: "1.0"
+target_type: "web"
+execution_mode: "red"
+
+variables:
+  delay: 5
+  max_attempts: 100
+  timeout: 600
+  wordlist_passwords: "/usr/share/wordlists/rockyou.txt"
+  wordlist_users: "/usr/share/seclists/Usernames/top-usernames-shortlist.txt"
+
+phases:
+  - name: login_endpoint_discovery
+    module: recon.auth
+    action: discover_endpoints
+    params:
+      paths:
+        - "/login"
+        - "/signin"
+        - "/auth"
+        - "/admin"
+        - "/Account/Login"
+        - "/user/login"
+        - "/api/login"
+    condition: "always"
+    confirmation_tier: 1
+    depends_on: []
+    critical: false
+
+  - name: authentication_analysis
+    module: recon.auth
+    action: analyze
+    params:
+      detect_csrf: true
+      detect_captcha: true
+      detect_mfa: true
+      detect_rate_limit: true
+    condition: "login_endpoints_found"
+    confirmation_tier: 2
+    depends_on: ["login_endpoint_discovery"]
+    critical: false
+
+  - name: http_form_bruteforce
+    module: validate.auth
+    action: http_form
+    params:
+      wordlist_users: "{{ variables.wordlist_users }}"
+      wordlist_passwords: "{{ variables.wordlist_passwords }}"
+      delay: "{{ variables.delay }}"
+      max_attempts: "{{ variables.max_attempts }}"
+    condition: "login_endpoints_found AND not_captcha_protected"
+    confirmation_tier: 3
+    depends_on: ["authentication_analysis"]
+    critical: true
+
+  - name: http_basic_bruteforce
+    module: validate.auth
+    action: http_basic
+    params:
+      wordlist_users: "{{ variables.wordlist_users }}"
+      wordlist_passwords: "{{ variables.wordlist_passwords }}"
+      delay: "{{ variables.delay }}"
+      max_attempts: "{{ variables.max_attempts }}"
+    condition: "http_basic_auth_detected"
+    confirmation_tier: 3
+    depends_on: ["authentication_analysis"]
+    critical: true
+
+  - name: credential_report
+    module: validate.auth
+    action: report
+    params:
+      include_found_credentials: true
+      include_attempt_count: true
+      include_remediation: true
+    condition: "bruteforce_successful"
+    confirmation_tier: 1
+    depends_on: ["http_form_bruteforce", "http_basic_bruteforce"]
+    critical: false
+
+  - name: rate_limit_analysis
+    module: validate.auth
+    action: rate_limit_analysis
+    params:
+      detect_patterns: true
+      suggest_evasion: true
+    condition: "rate_limit_detected"
+    confirmation_tier: 1
+    depends_on: ["authentication_analysis"]
+    critical: false

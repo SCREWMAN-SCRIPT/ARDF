@@ -3,14 +3,11 @@ interface/chat.py
 ─────────────────
 Interactive chat interface for ARDF.
 
-Enhanced with Cloudflare-aware commands:
-  - /bypass - Run Cloudflare bypass
-  - /workflow - View current workflow state
-  - /origin - Show discovered origin IPs
-  - /cf-status - Check Cloudflare status
-  - /adapt - Adapt workflow based on findings
-
-Supports natural language commands with Cloudflare awareness.
+Enhanced with new commands:
+  - /sqli: Run SQL injection validation
+  - /bruteforce: Run brute-force validation
+  - /tools: List available tools
+  - /scan: Quick scan with tools
 """
 
 import os
@@ -21,20 +18,13 @@ import readline
 import subprocess
 from typing import Any, Dict, List, Optional
 from pathlib import Path
-from datetime import datetime
 
 from modules.logger import get_logger, ARDFLogger
 from modules.session import Session, SessionMode
 
 
-# ─────────────────────────────────────────────────────────────
-# Chat Interface
-# ─────────────────────────────────────────────────────────────
-
 class ChatInterface:
-    """
-    Interactive chat interface with Cloudflare-aware commands.
-    """
+    """Interactive chat interface with enhanced commands."""
 
     def __init__(
         self,
@@ -61,11 +51,15 @@ class ChatInterface:
             "/clear": self._cmd_clear,
             "/exit": self._cmd_exit,
             "/quit": self._cmd_exit,
+            # NEW COMMANDS
+            "/sqli": self._cmd_sqli,
+            "/bruteforce": self._cmd_bruteforce,
+            "/tools": self._cmd_tools,
+            "/scan": self._cmd_scan,
         }
         self._load_history()
 
     def _load_history(self) -> None:
-        """Load command history."""
         if self.history_file.exists():
             try:
                 readline.read_history_file(str(self.history_file))
@@ -73,26 +67,20 @@ class ChatInterface:
                 pass
 
     def _save_history(self) -> None:
-        """Save command history."""
         try:
             readline.write_history_file(str(self.history_file))
         except Exception:
             pass
 
     def _prompt(self) -> str:
-        """Generate prompt string."""
         target = self.session.meta.target
         mode = self.session.meta.mode.value.upper()
-        # Check if Cloudflare detected
         cf_status = self._get_cf_status()
         cf_indicator = " 🔥" if cf_status.get("detected") else ""
         return f"\033[36mardf({mode}){cf_indicator}\033[0m:\033[33m{target}\033[0m> "
 
     def _get_cf_status(self) -> Dict:
-        """Get Cloudflare status from session."""
         status = {"detected": False, "bypassed": False, "origin": None}
-        
-        # Check recon data
         recon_path = self.session.dir("recon") / "recon_passive_summary.json"
         if recon_path.exists():
             try:
@@ -102,8 +90,6 @@ class ChatInterface:
                 status["version"] = cf.get("version")
             except Exception:
                 pass
-        
-        # Check bypass data
         bypass_path = self.session.dir("bypass") / "bypass_report.json"
         if bypass_path.exists():
             try:
@@ -114,13 +100,121 @@ class ChatInterface:
                     status["origin"] = candidates[0]
             except Exception:
                 pass
-        
         return status
 
-    # ── Commands ─────────────────────────────────────────────
+    # ── NEW COMMANDS ──────────────────────────────────────────
+
+    def _cmd_sqli(self, args: List[str]) -> None:
+        """Run SQL injection validation."""
+        target = self.session.meta.target
+        print(f"\033[33mRunning SQL injection validation on {target}...\033[0m")
+
+        try:
+            from modules.validate.sqli import SQLiValidator
+            sqli = SQLiValidator(self.session, self.logger)
+
+            urls = []
+            for f in self.session.get_findings():
+                if f.evidence and "http" in f.evidence:
+                    urls.append(f.evidence)
+
+            if not urls:
+                urls = [f"https://{target}", f"http://{target}"]
+
+            for url in urls[:3]:
+                print(f"\n  Testing: {url}")
+                result = sqli.validate(url)
+
+                if result.get("confirmed"):
+                    print(f"\033[32m  ✅ SQL injection confirmed on {url}\033[0m")
+                    for confirmed in result.get("confirmed", []):
+                        print(f"    - Parameter: {confirmed.get('parameter', 'unknown')}")
+                        print(f"    - Type: {confirmed.get('vuln_type', 'unknown')}")
+                elif result.get("vulnerable"):
+                    print(f"\033[33m  ⚠️ Potential SQL injection found on {url}\033[0m")
+                    for vuln in result.get("vulnerable", []):
+                        print(f"    - Parameter: {vuln.get('parameter', 'unknown')}")
+                else:
+                    print(f"\033[90m  ❌ No SQL injection found on {url}\033[0m")
+
+        except Exception as e:
+            print(f"\033[31mError: {e}\033[0m")
+
+    def _cmd_bruteforce(self, args: List[str]) -> None:
+        """Run brute-force validation."""
+        target = self.session.meta.target
+        print(f"\033[33mRunning brute-force validation on {target}...\033[0m")
+
+        try:
+            from modules.validate.auth import AuthValidator
+            auth = AuthValidator(self.session, self.logger)
+            result = auth.run(target)
+
+            endpoints = result.get("login_endpoints", [])
+            vulns = result.get("vulnerabilities", [])
+
+            print(f"\n  Found {len(endpoints)} login endpoints")
+            for endpoint in endpoints[:5]:
+                print(f"    - {endpoint}")
+
+            if vulns:
+                print(f"\n\033[32m  ✅ {len(vulns)} vulnerabilities found:\033[0m")
+                for vuln in vulns:
+                    print(f"    - {vuln.get('type', 'unknown')} on {vuln.get('endpoint', 'unknown')}")
+                    if vuln.get("found"):
+                        for cred in vuln.get("found", []):
+                            print(f"      Credential: {cred.get('username', 'unknown')}:{cred.get('password', 'unknown')}")
+            else:
+                print(f"\033[90m  ❌ No brute-force vulnerabilities found\033[0m")
+
+        except Exception as e:
+            print(f"\033[31mError: {e}\033[0m")
+
+    def _cmd_tools(self, args: List[str]) -> None:
+        """List available tools."""
+        print("\033[1mAvailable Tools:\033[0m")
+
+        tools = [
+            ("sqlmap", "SQL injection automation"),
+            ("hydra", "Brute-force password cracking"),
+            ("nmap", "Network discovery and scanning"),
+        ]
+
+        for tool, desc in tools:
+            try:
+                import subprocess
+                result = subprocess.run(["which", tool], capture_output=True, text=True, timeout=2)
+                status = "\033[32m✅ installed\033[0m" if result.returncode == 0 else "\033[31m❌ not found\033[0m"
+            except Exception:
+                status = "\033[31m❌ not found\033[0m"
+            print(f"  {tool}: {desc} - {status}")
+
+    def _cmd_scan(self, args: List[str]) -> None:
+        """Quick scan with tools."""
+        target = self.session.meta.target
+        tool = args[0] if args else "nmap"
+
+        print(f"\033[33mRunning quick scan with {tool} on {target}...\033[0m")
+
+        if tool == "nmap":
+            try:
+                from modules.tools.nmap_wrapper import NmapWrapper
+                nmap = NmapWrapper(self.session, self.logger)
+                result = nmap.quick_scan(target)
+
+                ports = result.get("ports", [])
+                print(f"\n  Found {len(ports)} open ports")
+                for port in ports[:10]:
+                    print(f"    - {port.get('port')}/{port.get('protocol')}: {port.get('service', 'unknown')}")
+
+            except Exception as e:
+                print(f"\033[31mError: {e}\033[0m")
+        else:
+            print(f"\033[33mTool '{tool}' not supported for quick scan. Use /tools to see available tools.\033[0m")
+
+    # ── Existing Commands ─────────────────────────────────────
 
     def _cmd_help(self, args: List[str]) -> None:
-        """Show help."""
         help_text = """
 \033[1mARDF Chat Commands\033[0m
 
@@ -132,6 +226,14 @@ class ChatInterface:
 \033[36mWorkflow Commands:\033[0m
   /workflow             - Show current workflow state
   /adapt                - Adapt workflow based on findings
+
+\033[36mValidation Commands:\033[0m (NEW)
+  /sqli                 - Run SQL injection validation
+  /bruteforce           - Run brute-force validation
+
+\033[36mTool Commands:\033[0m (NEW)
+  /tools                - List available tools
+  /scan [tool]          - Quick scan with tool (nmap, sqlmap, hydra)
 
 \033[36mGeneral Commands:\033[0m
   /findings [count]     - Show recent findings
@@ -147,14 +249,15 @@ class ChatInterface:
   - "run adaptive workflow"
   - "show origin IPs"
   - "generate report"
+  - "test SQL injection"
+  - "brute-force login"
 """
         print(help_text)
 
     def _cmd_bypass(self, args: List[str]) -> None:
-        """Run Cloudflare bypass."""
         target = self.session.meta.target
         print(f"\033[33mRunning Cloudflare bypass for {target}...\033[0m")
-        
+
         from modules.bypass import run_bypass
         try:
             result = run_bypass(target, self.session, self.logger)
@@ -162,15 +265,12 @@ class ChatInterface:
                 print(f"\033[32m✅ Bypass successful!\033[0m")
                 print(f"  Origin candidates: {', '.join(result.get('origin_candidates', [])[:3])}")
                 print(f"  Best candidate: {result.get('best_candidate', 'N/A')}")
-                print(f"  Techniques succeeded: {', '.join([t for t, r in result.get('techniques', {}).items() if r.get('success')])}")
             else:
                 print("\033[31m❌ Bypass failed. No origin candidates found.\033[0m")
-                print("  Consider: social engineering, phishing, or supply chain attacks.")
         except Exception as e:
             print(f"\033[31mError: {e}\033[0m")
 
     def _cmd_workflow(self, args: List[str]) -> None:
-        """Show current workflow state."""
         state_path = self.session.dir("core") / "workflow_state.json"
         if not state_path.exists():
             print("\033[33mNo workflow state found. Run a mission first.\033[0m")
@@ -186,18 +286,18 @@ class ChatInterface:
             print(f"  WAF Type: {data.get('waf_type', 'N/A')}")
             print(f"  Completed: {len(data.get('completed_tasks', []))} tasks")
             print(f"  Failed: {len(data.get('failed_tasks', []))} tasks")
+            print(f"  SQLi Findings: {len(data.get('sqli_findings', []))}")
+            print(f"  BruteForce Findings: {len(data.get('bruteforce_findings', []))}")
             if data.get('errors'):
                 print(f"  Errors: {data['errors'][-3:]}")
         except Exception as e:
             print(f"\033[31mError reading workflow state: {e}\033[0m")
 
     def _cmd_origin(self, args: List[str]) -> None:
-        """Show discovered origin IPs."""
         status = self._get_cf_status()
         if status.get("origin"):
             print(f"\033[32mOrigin IP: {status['origin']}\033[0m")
         else:
-            # Check bypass report for all candidates
             bypass_path = self.session.dir("bypass") / "bypass_report.json"
             if bypass_path.exists():
                 try:
@@ -207,8 +307,6 @@ class ChatInterface:
                         print(f"\033[32mOrigin candidates:\033[0m")
                         for i, ip in enumerate(candidates[:10], 1):
                             print(f"  {i}. {ip}")
-                        if len(candidates) > 10:
-                            print(f"  ... and {len(candidates) - 10} more")
                     else:
                         print("\033[33mNo origin candidates found.\033[0m")
                 except Exception:
@@ -217,9 +315,7 @@ class ChatInterface:
                 print("\033[33mRun /bypass first to discover origin IPs.\033[0m")
 
     def _cmd_cf_status(self, args: List[str]) -> None:
-        """Show Cloudflare detection status."""
         status = self._get_cf_status()
-        
         print("\033[1mCloudflare Status\033[0m")
         print(f"  Detected: {'✅' if status.get('detected') else '❌'}")
         if status.get('version'):
@@ -227,45 +323,19 @@ class ChatInterface:
         print(f"  Bypassed: {'✅' if status.get('bypassed') else '❌'}")
         print(f"  Origin IP: {status.get('origin', 'N/A')}")
 
-        # Check if we have bypass data
-        bypass_path = self.session.dir("bypass") / "bypass_report.json"
-        if bypass_path.exists():
-            try:
-                data = json.loads(bypass_path.read_text())
-                techs = data.get("techniques", {})
-                print(f"\n  \033[1mTechnique Results:\033[0m")
-                for name, result in techs.items():
-                    status_icon = "✅" if result.get("success") else "❌"
-                    ip = result.get("origin_ip", "")
-                    print(f"    {status_icon} {name}: {ip or 'failed'}")
-            except Exception:
-                pass
-
     def _cmd_adapt(self, args: List[str]) -> None:
-        """Adapt workflow based on findings."""
         print("\033[33mAdapting workflow based on current findings...\033[0m")
-
-        # Load tactical decision
         decision_path = self.session.dir("ai") / "tactical_decision.json"
         if decision_path.exists():
             try:
                 data = json.loads(decision_path.read_text())
                 print("\033[1mTactical Decision:\033[0m")
                 print(f"  Recommendation: {data.get('decision', {}).get('recommendation', 'N/A')}")
-                
-                # Show bypass suggestions
-                bypass_suggest = data.get("decision", {}).get("bypass", {})
-                if bypass_suggest:
-                    print(f"\n  \033[1mBypass Suggestions:\033[0m")
-                    print(f"    Estimated success: {bypass_suggest.get('estimated_success_rate', 0) * 100:.0f}%")
-                    print(f"    Priority order: {', '.join(bypass_suggest.get('priority_order', [])[:5])}")
             except Exception:
                 pass
-        
-        print("\033[33mUse /workflow to see current state and /bypass to attempt bypass.\033[0m")
+        print("\033[33mUse /workflow to see current state and /sqli or /bruteforce to run validations.\033[0m")
 
     def _cmd_findings(self, args: List[str]) -> None:
-        """Show recent findings."""
         count = 10
         if args:
             try:
@@ -295,7 +365,6 @@ class ChatInterface:
                 print(f"    CVE: {f.cve}")
 
     def _cmd_report(self, args: List[str]) -> None:
-        """Generate report."""
         print("\033[33mGenerating report...\033[0m")
         from modules.report import generate_report
         try:
@@ -310,7 +379,6 @@ class ChatInterface:
             print(f"\033[31mError generating report: {e}\033[0m")
 
     def _cmd_status(self, args: List[str]) -> None:
-        """Show session status."""
         meta = self.session.meta
         print("\033[1mSession Status\033[0m")
         print(f"  ID: {meta.session_id}")
@@ -323,7 +391,6 @@ class ChatInterface:
         print(f"  Created: {meta.created_at}")
 
     def _cmd_config(self, args: List[str]) -> None:
-        """Show configuration."""
         config_path = Path("config/ardf.yaml")
         if not config_path.exists():
             print("\033[33mConfig file not found.\033[0m")
@@ -332,9 +399,8 @@ class ChatInterface:
         try:
             import yaml
             data = yaml.safe_load(config_path.read_text())
-            
+
             if args:
-                # Show specific key
                 key = args[0]
                 parts = key.split(".")
                 value = data
@@ -348,8 +414,7 @@ class ChatInterface:
                 else:
                     print(f"\033[33mKey '{key}' not found.\033[0m")
             else:
-                # Show relevant sections
-                relevant = ["recon", "bypass", "workflow", "redteam", "cloudflare"]
+                relevant = ["recon", "bypass", "workflow", "redteam", "cloudflare", "sqli", "bruteforce", "stealth"]
                 print("\033[1mConfiguration (relevant sections):\033[0m")
                 for section in relevant:
                     if section in data:
@@ -359,19 +424,24 @@ class ChatInterface:
             print(f"\033[31mError reading config: {e}\033[0m")
 
     def _cmd_clear(self, args: List[str]) -> None:
-        """Clear screen."""
         os.system('cls' if os.name == 'nt' else 'clear')
 
     def _cmd_exit(self, args: List[str]) -> None:
-        """Exit chat."""
         self.running = False
         print("\033[36mGoodbye!\033[0m")
 
     # ── Natural language handling ────────────────────────────
 
     def _handle_natural_language(self, text: str) -> bool:
-        """Handle natural language commands."""
         text_lower = text.lower()
+
+        if "sqli" in text_lower or "sql injection" in text_lower:
+            self._cmd_sqli([])
+            return True
+
+        if "bruteforce" in text_lower or "brute force" in text_lower:
+            self._cmd_bruteforce([])
+            return True
 
         if "bypass" in text_lower and ("cloudflare" in text_lower or "cf" in text_lower):
             self._cmd_bypass([])
@@ -381,7 +451,7 @@ class ChatInterface:
             self._cmd_workflow([])
             return True
 
-        if "origin" in text_lower or "origin ip" in text_lower:
+        if "origin" in text_lower:
             self._cmd_origin([])
             return True
 
@@ -393,7 +463,7 @@ class ChatInterface:
             self._cmd_adapt([])
             return True
 
-        if "report" in text_lower or "generate report" in text_lower:
+        if "report" in text_lower:
             self._cmd_report([])
             return True
 
@@ -405,6 +475,16 @@ class ChatInterface:
             self._cmd_status([])
             return True
 
+        if "tools" in text_lower:
+            self._cmd_tools([])
+            return True
+
+        if "scan" in text_lower:
+            parts = text_lower.split()
+            tool = parts[parts.index("scan") + 1] if "scan" in parts and len(parts) > parts.index("scan") + 1 else "nmap"
+            self._cmd_scan([tool])
+            return True
+
         if "help" in text_lower:
             self._cmd_help([])
             return True
@@ -414,7 +494,6 @@ class ChatInterface:
     # ── Run ──────────────────────────────────────────────────
 
     def run(self) -> None:
-        """Run the chat interface."""
         print("\033[36m" + r"""
    ___  ____  ______   ____
   / _ \/ __ \/ ____/  / __ \____  __
@@ -434,7 +513,6 @@ class ChatInterface:
 
                 self._save_history()
 
-                # Handle commands
                 if user_input.startswith("/"):
                     parts = user_input.split()
                     cmd = parts[0].lower()
@@ -446,7 +524,6 @@ class ChatInterface:
                         print(f"\033[33mUnknown command: {cmd}\033[0m")
                         print("Type /help for available commands")
                 else:
-                    # Natural language
                     if not self._handle_natural_language(user_input):
                         print("\033[33mCould not understand. Try /help or be more specific.\033[0m")
 
@@ -460,17 +537,7 @@ class ChatInterface:
                 print(f"\033[31mError: {e}\033[0m")
 
 
-# ─────────────────────────────────────────────────────────────
-# Public entry point
-# ─────────────────────────────────────────────────────────────
-
-def run_chat(
-    session: Session,
-    logger: Optional[ARDFLogger] = None
-) -> None:
-    """
-    Run the chat interface.
-    """
+def run_chat(session: Session, logger: Optional[ARDFLogger] = None) -> None:
     if logger is None:
         logger = get_logger("chat")
     chat = ChatInterface(session, logger)

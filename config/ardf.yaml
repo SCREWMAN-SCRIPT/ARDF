@@ -1,5 +1,5 @@
 # ARDF Global Configuration
-# Enhanced with Cloudflare bypass and workflow settings
+# Enhanced with stealth, SQL injection, and brute-force sections
 
 version: "2.0"
 session_dir: "output/sessions"
@@ -30,7 +30,258 @@ recon:
       max_candidates: 10
 
 # ─────────────────────────────────────────────────────────────
-# Bypass Settings (NEW)
+# Stealth Settings (NEW)
+# ─────────────────────────────────────────────────────────────
+
+stealth:
+  enabled: true
+  rate_limit: 2                    # Requests per second (global default)
+  jitter: 0.5                      # Random delay variance (± seconds)
+  user_agent_rotation: true
+  user_agents:
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    - "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    - "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:109.0) Gecko/20100101 Firefox/121.0"
+    - "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15"
+    - "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 Edg/120.0.0.0"
+  proxy:
+    enabled: false
+    type: "socks5"                 # http, https, socks5
+    address: "127.0.0.1:9050"      # Tor default
+    username: ""
+    password: ""
+  max_retries: 3
+  retry_delay: 5                   # Seconds between retries
+  captcha_detection: true
+  throttle_on_error: true
+  error_backoff: 60                # Seconds to pause on error
+  safe_ports:                      # Ports considered "safe" to scan
+    - 80
+    - 443
+    - 8080
+    - 8443
+    - 22
+    - 21
+    - 25
+    - 53
+    - 143
+    - 993
+    - 110
+    - 995
+    - 587
+    - 465
+  dangerous_ports:                 # Ports that trigger alerts before scanning
+    - 3306                         # MySQL
+    - 5432                         # PostgreSQL
+    - 1433                         # MSSQL
+    - 27017                        # MongoDB
+    - 6379                         # Redis
+    - 9200                         # Elasticsearch
+    - 9042                         # Cassandra
+    - 5984                         # CouchDB
+    - 7687                         # Neo4j
+  scan_modes:
+    passive:
+      rate: 0
+      impact: "none"
+      description: "Zero impact, no direct target contact"
+    low:
+      rate: 1
+      impact: "minimal"
+      description: "Minimal impact, 1 request/sec"
+    medium:
+      rate: 5
+      impact: "moderate"
+      description: "Moderate impact, 5 requests/sec"
+    high:
+      rate: 20
+      impact: "significant"
+      description: "Significant impact, 20 requests/sec"
+  tor:
+    enabled: false
+    control_port: 9051
+    new_circuit_on_failure: true
+    new_circuit_interval: 300      # Seconds between new circuits
+
+# ─────────────────────────────────────────────────────────────
+# SQL Injection Settings (NEW)
+# ─────────────────────────────────────────────────────────────
+
+sqli:
+  enabled: true
+  timeout: 300
+  confirmation_tier: 3             # Requires typed CONFIRM
+  methods:
+    - error                        # Error-based SQL injection
+    - union                        # UNION-based SQL injection
+    - boolean                      # Boolean blind SQL injection
+    - time                         # Time-based blind SQL injection
+    - stacked                      # Stacked queries
+    - out_of_band                  # Out-of-band (DNS, HTTP)
+  delay: 2                         # Seconds between requests
+  max_attempts: 50                 # Max injection attempts per endpoint
+  database_types:
+    - mysql
+    - postgresql
+    - mssql
+    - oracle
+    - sqlite
+  waf_evasion:
+    enabled: true
+    techniques:
+      - comment_removal
+      - whitespace_bypass
+      - case_variation
+      - operator_substitution
+      - encoding_bypass
+      - null_byte
+      - unicode_encoding
+      - polyglot
+  payloads:
+    error_based:
+      - "'"
+      - "\""
+      - "' OR '1'='1"
+      - "' OR 1=1--"
+      - "' UNION SELECT NULL--"
+      - "' AND SLEEP(5)--"
+      - "' AND (SELECT * FROM (SELECT(SLEEP(5)))a)--"
+    union_based:
+      - "' UNION SELECT NULL--"
+      - "' UNION SELECT NULL,NULL--"
+      - "' UNION SELECT NULL,NULL,NULL--"
+    boolean_based:
+      - "' AND '1'='1"
+      - "' AND '1'='2"
+      - "' OR '1'='1"
+      - "' OR '1'='2"
+    time_based:
+      - "' AND SLEEP(5)--"
+      - "' OR SLEEP(5)--"
+      - "'; WAITFOR DELAY '0:0:5'--"
+  detection:
+    error_patterns:
+      - "SQL syntax"
+      - "mysql"
+      - "postgres"
+      - "mssql"
+      - "oracle"
+      - "sqlite"
+      - "ODBC"
+      - "Driver"
+      - "DB2"
+      - "SQL error"
+      - "Warning: mysql"
+      - "Unclosed quotation mark"
+      - "Microsoft OLE DB"
+    boolean_true_patterns:
+      - "Welcome"
+      - "Success"
+      - "Found"
+      - "Exists"
+    boolean_false_patterns:
+      - "Error"
+      - "Failed"
+      - "Not found"
+      - "Invalid"
+  response_analysis:
+    compare_content: true
+    compare_status: true
+    compare_time: true
+    timeout_threshold: 5           # Seconds to consider as time-based
+  reporting:
+    include_payload: true
+    include_evidence: true
+    include_remediation: true
+
+# ─────────────────────────────────────────────────────────────
+# Brute-Force Settings (NEW)
+# ─────────────────────────────────────────────────────────────
+
+bruteforce:
+  enabled: true
+  timeout: 600
+  confirmation_tier: 3             # Requires typed CONFIRM
+  methods:
+    - http_form                    # HTTP POST form brute-force
+    - http_basic                   # HTTP Basic Auth
+    - ssh                          # SSH brute-force
+    - ftp                          # FTP brute-force
+    - smb                          # SMB brute-force
+    - rdp                          # RDP brute-force
+    - smtp                         # SMTP brute-force
+    - mysql                        # MySQL brute-force
+    - postgresql                   # PostgreSQL brute-force
+    - mssql                        # MSSQL brute-force
+  delay: 5                         # Seconds between attempts
+  max_attempts: 100                # Max attempts per target
+  wordlists:
+    passwords:
+      - "/usr/share/wordlists/rockyou.txt"
+      - "/usr/share/seclists/Passwords/Common-Credentials/10-million-password-list-top-1000000.txt"
+      - "/usr/share/wordlists/fasttrack.txt"
+    users:
+      - "/usr/share/seclists/Usernames/top-usernames-shortlist.txt"
+      - "/usr/share/seclists/Usernames/xato-net-10-million-usernames.txt"
+      - "/usr/share/wordlists/names.txt"
+  target_discovery:
+    login_endpoints:
+      - "/login"
+      - "/signin"
+      - "/auth"
+      - "/admin"
+      - "/administrator"
+      - "/adm"
+      - "/Account/Login"
+      - "/user/login"
+      - "/api/login"
+    admin_panels:
+      - "/admin"
+      - "/administrator"
+      - "/wp-admin"
+      - "/cpanel"
+      - "/plesk"
+      - "/webmail"
+  detection:
+    successful_login_patterns:
+      - "Welcome"
+      - "Dashboard"
+      - "Logged in"
+      - "Success"
+      - "Redirect"
+    failed_login_patterns:
+      - "Invalid"
+      - "Incorrect"
+      - "Error"
+      - "Failed"
+      - "Invalid username"
+      - "Invalid password"
+    rate_limit_patterns:
+      - "Too many"
+      - "Rate limit"
+      - "429"
+      - "Throttled"
+      - "Try again later"
+    captcha_patterns:
+      - "captcha"
+      - "recaptcha"
+      - "verify"
+      - "security check"
+      - "I'm not a robot"
+  evasion:
+    session_reuse: true            # Reuse session cookies
+    csrf_token_extraction: true    # Extract CSRF tokens from forms
+    random_delays: true            # Random delay between attempts
+    ip_rotation: false             # Rotate IP via proxy
+    user_agent_rotation: true      # Rotate User-Agent per attempt
+  reporting:
+    include_found_credentials: true
+    include_attempt_count: true
+    include_remediation: true
+
+# ─────────────────────────────────────────────────────────────
+# Bypass Settings
 # ─────────────────────────────────────────────────────────────
 
 bypass:
@@ -82,7 +333,7 @@ bypass:
   max_candidates: 5
 
 # ─────────────────────────────────────────────────────────────
-# Workflow Settings (NEW)
+# Workflow Settings
 # ─────────────────────────────────────────────────────────────
 
 workflow:
@@ -96,6 +347,8 @@ workflow:
     - reconnaissance
     - bypass
     - exploitation
+    - sqli_validation          # NEW
+    - bruteforce_validation    # NEW
     - post_exploit
     - reporting
   branch_conditions:
@@ -103,9 +356,11 @@ workflow:
     bypass_succeeded: "bypass_succeeded"
     bypass_failed: "bypass_failed"
     origin_known: "origin_known"
+    login_endpoints_found: "login_endpoints_found"
+    sqli_parameters_found: "sqli_parameters_found"
 
 # ─────────────────────────────────────────────────────────────
-# Red Team Settings (NEW)
+# Red Team Settings
 # ─────────────────────────────────────────────────────────────
 
 redteam:
@@ -123,6 +378,8 @@ redteam:
     - service_exploit
     - social_engineering
     - supply_chain
+    - sqli_exploit            # NEW
+    - bruteforce_attack       # NEW
   max_workers: 3
   timeout: 7200
 
@@ -138,6 +395,8 @@ ai:
   prompts:
     bypass: "ai/prompts/bypass.txt"
     workflow: "ai/prompts/workflow.txt"
+    sqli: "ai/prompts/sqli.txt"          # NEW
+    bruteforce: "ai/prompts/bruteforce.txt" # NEW
   cloudflare_aware: true
 
 # ─────────────────────────────────────────────────────────────
@@ -173,6 +432,8 @@ reporting:
     - bypass_results
     - workflow_results
     - redteam_results
+    - sqli_results           # NEW
+    - bruteforce_results     # NEW
   purple_mode: true
   open_browser: false
 
@@ -195,8 +456,8 @@ logging:
 performance:
   max_parallel_tools: 5
   tool_timeout: 3600
-  global_timeout: 28800  # 8 hours
-  rate_limit: 10  # requests per second
+  global_timeout: 28800
+  rate_limit: 10
 
 # ─────────────────────────────────────────────────────────────
 # Security Settings
@@ -208,7 +469,9 @@ security:
   tier_3_confirmation: "typed_confirm"
   allow_offensive: true
   allow_exploitation: true
-  allow_post_exploit: false  # Default disabled for safety
+  allow_post_exploit: false
+  allow_sqli: true           # NEW
+  allow_bruteforce: true     # NEW
 
 # ─────────────────────────────────────────────────────────────
 # Cloudflare-specific defaults

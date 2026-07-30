@@ -3,31 +3,24 @@ modules/recon.py
 ─────────────────
 Reconnaissance module for ARDF.
 
-Enhanced with:
-  - Deep OSINT (20+ sources)
-  - Cloudflare detection + bypass readiness
-  - Origin IP discovery
-  - WAF fingerprinting
-  - Adaptive recon depth based on findings
-
-Passive OSINT    : subfinder, amass, crt.sh, theHarvester, gau,
-                   waybackurls, waymore, whois, dnsrecon, dnsenum,
-                   fierce, shodan-cli, holehe, sherlock, socialhunter,
-                   pagodo, gitdorker, linkedin2username, dnstwist,
-                   securitytrails API, c99.nl API
-
-Active DNS/Net   : massdns, puredns, altdns, gotator, shuffledns,
-                   dnsx, mapcidr, cdncheck, tlsx
-
-Web Surface      : httpx, hakrawler, getJS, paramspider, cariddi,
-                   photon, gowitness, eyewitness, aquatone,
-                   wappalyzer, cmseek, wafw00f, whatweb, nikto,
-                   xnlinkfinder, subjack, s3scanner, cloud_enum,
-                   dnstwist
-
-Deep             : masscan, nmap, nuclei, ffuf, gospider, katana,
-                   gf, trufflehog, arjun, dalfox, sqlmap, wpscan,
-                   secretfinder, linkfinder
+Enhanced with integrated stealth and new recon modules:
+  - domain.py: WHOIS, DNS records, zone transfer
+  - subdomain.py: Passive + active subdomain enumeration
+  - web.py: HTTP headers, HTML/JS, SSL/TLS, crt.sh
+  - cdn.py: CDN detection
+  - cloud.py: AWS/Azure/GCP detection, buckets
+  - social.py: LinkedIn, GitHub, email harvesting
+  - cache.py: Wayback Machine, Git, backups
+  - vuln_intel.py: NVD, Exploit-DB, CVSS
+  - network.py: Host discovery, port scanning
+  - web_deep.py: HTTP verbs, dir/param discovery
+  - database.py: DB port scanning, service detection
+  - service.py: SSH, RDP, SMB, FTP, SMTP, DNS, SNMP
+  - cloud_deep.py: AWS/Azure/GCP deep enumeration
+  - vpn.py: VPN service detection
+  - auth.py: Identity providers, login portals, MFA
+  - dev.py: Dev interfaces, .git, source maps
+  - lateral.py: Internal mapping, lateral movement
 """
 
 import os
@@ -41,14 +34,15 @@ import urllib.error
 import urllib.parse
 import subprocess
 from pathlib import Path
-from typing  import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
-from modules.logger  import get_logger, ARDFLogger
+from modules.logger import get_logger, ARDFLogger
 from modules.session import Session, Finding, SeverityLevel
+from modules.stealth import get_stealth_engine, StealthEngine, ScanMode
 
 
 # ─────────────────────────────────────────────────────────────
-# Tool registry
+# Tool registry (unchanged)
 # ─────────────────────────────────────────────────────────────
 
 TOOLS: Dict[str, str] = {
@@ -118,8 +112,9 @@ SHODAN_KEY         = os.environ.get("SHODAN_API_KEY", "")
 SECURITYTRAILS_KEY = os.environ.get("SECURITYTRAILS_API_KEY", "")
 C99_KEY            = os.environ.get("C99_API_KEY", "")
 
+
 # ─────────────────────────────────────────────────────────────
-# ENHANCED: Cloudflare detection constants
+# Cloudflare detection constants (unchanged)
 # ─────────────────────────────────────────────────────────────
 
 CLOUDFLARE_HEADERS = [
@@ -135,7 +130,7 @@ CLOUDFLARE_JS_CHALLENGE = "cdn-cgi/challenge-platform"
 
 
 # ─────────────────────────────────────────────────────────────
-# Utilities
+# Utilities (enhanced with stealth)
 # ─────────────────────────────────────────────────────────────
 
 def _avail(name: str) -> bool:
@@ -222,7 +217,7 @@ def _resolve(hostnames: List[str], logger: ARDFLogger) -> List[str]:
 
 
 # ─────────────────────────────────────────────────────────────
-# ENHANCED: Cloudflare detection + bypass readiness
+# ENHANCED: Cloudflare detection with stealth
 # ─────────────────────────────────────────────────────────────
 
 def _is_cloudflare_ip(ip: str) -> bool:
@@ -239,13 +234,7 @@ def _is_cloudflare_ip(ip: str) -> bool:
 
 
 def _detect_cloudflare(target: str, logger: ARDFLogger) -> Dict[str, Any]:
-    """
-    Check if target is behind Cloudflare using:
-    1. HTTP headers
-    2. IP ranges
-    3. /cdn-cgi/ challenge page
-    4. DNS resolution
-    """
+    """Check if target is behind Cloudflare using stealth engine."""
     result = {
         "detected": False,
         "version": None,
@@ -254,93 +243,67 @@ def _detect_cloudflare(target: str, logger: ARDFLogger) -> Dict[str, Any]:
         "challenge_present": False,
         "bypass_possible": []
     }
-    
+
+    stealth = get_stealth_engine(logger)
+
     # Try HTTPS first, fallback to HTTP
     for scheme in ["https", "http"]:
         try:
             url = f"{scheme}://{target}"
-            req = urllib.request.Request(
-                url,
-                headers={"User-Agent": "ARDF/2.0"},
-                method="HEAD"
-            )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                headers = {k.lower(): v for k, v in resp.getheaders()}
-                result["headers"] = headers
-                
-                # Check for Cloudflare headers
-                for cf_header in CLOUDFLARE_HEADERS:
-                    if cf_header in headers:
-                        result["detected"] = True
-                        result["version"] = headers.get("cf-ray", "unknown")
-                        break
-                
-                # Check IP
-                try:
-                    ip = socket.gethostbyname(target)
-                    if _is_cloudflare_ip(ip):
-                        result["detected"] = True
-                        result["ip_range"] = "cloudflare"
-                except Exception:
-                    pass
-                break
-        except Exception:
-            continue
-    
-    # Check for /cdn-cgi/ challenge page
-    try:
-        url = f"https://{target}/{CLOUDFLARE_JS_CHALLENGE}"
-        req = urllib.request.Request(url, headers={"User-Agent": "ARDF/2.0"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            if resp.status == 403 or "Cloudflare" in str(resp.read()):
+            status, headers, content = stealth.get(url, timeout=10)
+            result["headers"] = headers
+
+            for cf_header in CLOUDFLARE_HEADERS:
+                if cf_header in headers:
+                    result["detected"] = True
+                    result["version"] = headers.get("cf-ray", "unknown")
+                    break
+
+            # Check IP
+            try:
+                ip = socket.gethostbyname(target)
+                if _is_cloudflare_ip(ip):
+                    result["detected"] = True
+                    result["ip_range"] = "cloudflare"
+            except Exception:
+                pass
+
+            # Check for challenge page
+            if stealth.check_captcha(content):
                 result["challenge_present"] = True
                 result["detected"] = True
-    except Exception:
-        pass
-    
-    # Determine bypass possibilities
+
+            break
+        except Exception:
+            continue
+
     if result["detected"]:
         result["bypass_possible"] = [
-            "dns_history",
-            "ssl_cert_history",
-            "subdomain_enumeration",
-            "mx_record",
-            "cloudflare_worker_exploit",
-            "cache_poisoning",
+            "dns_history", "ssl_cert_history", "subdomain_enumeration",
+            "mx_record", "cloudflare_worker_exploit", "cache_poisoning",
             "host_header_manipulation"
         ]
-        if result.get("version"):
-            result["bypass_possible"].append("version_specific_exploit")
-    
-    if result["detected"]:
         logger.finding(
             f"Cloudflare detected on {target}",
             severity="info",
             host=target
         )
-    
+
     return result
 
 
 def _find_origin_candidates(target: str, logger: ARDFLogger) -> List[str]:
-    """
-    Try to find original server IP behind Cloudflare using:
-    1. DNS history
-    2. SSL certificate history
-    3. MX/SMTP records
-    """
+    """Find origin server candidates behind Cloudflare."""
     candidates = []
-    
+    stealth = get_stealth_engine(logger)
+
     # DNS history via SecurityTrails
     if SECURITYTRAILS_KEY:
         try:
             url = f"https://api.securitytrails.com/v1/domain/{target}/history/a"
-            req = urllib.request.Request(
-                url,
-                headers={"APIKEY": SECURITYTRAILS_KEY, "Accept": "application/json"}
-            )
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                data = json.loads(resp.read())
+            status, headers, content = stealth.get(url, headers={"APIKEY": SECURITYTRAILS_KEY})
+            if status == 200:
+                data = json.loads(content)
                 for item in data.get("items", []):
                     for ip in item.get("ips", []):
                         if not _is_cloudflare_ip(ip) and ip not in candidates:
@@ -348,26 +311,23 @@ def _find_origin_candidates(target: str, logger: ARDFLogger) -> List[str]:
                 logger.success(f"SecurityTrails: {len(candidates)} origin candidates")
         except Exception as e:
             logger.warning(f"SecurityTrails history failed: {e}")
-    
+
     # SSL certificate history via crt.sh
     try:
         url = f"https://crt.sh/?q=%.{target}&output=json"
-        req = urllib.request.Request(url, headers={"User-Agent": "ARDF/2.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
+        status, headers, content = stealth.get(url)
+        if status == 200:
+            data = json.loads(content)
             for entry in data:
-                if entry.get("serial_number"):
-                    # Parse commonName from certificate data
-                    name_value = entry.get("name_value", "")
-                    if "IP:" in name_value:
-                        ip_match = re.search(r"IP:([\d.]+)", name_value)
-                        if ip_match:
-                            ip = ip_match.group(1)
-                            if not _is_cloudflare_ip(ip) and ip not in candidates:
-                                candidates.append(ip)
+                name_value = entry.get("name_value", "")
+                ip_match = re.search(r"IP:([\d.]+)", name_value)
+                if ip_match:
+                    ip = ip_match.group(1)
+                    if not _is_cloudflare_ip(ip) and ip not in candidates:
+                        candidates.append(ip)
     except Exception as e:
         logger.warning(f"crt.sh origin search failed: {e}")
-    
+
     # MX record resolution
     try:
         stdout, _ = _run(["dig", "MX", target], logger, 10)
@@ -383,20 +343,23 @@ def _find_origin_candidates(target: str, logger: ARDFLogger) -> List[str]:
                         pass
     except Exception:
         pass
-    
+
     return candidates
 
 
 # ─────────────────────────────────────────────────────────────
-# External data sources (no API key needed)
+# External data sources (enhanced with stealth)
 # ─────────────────────────────────────────────────────────────
 
 def _fetch_crtsh(domain: str, logger: ARDFLogger) -> List[str]:
+    """Fetch certificate transparency logs."""
     url = f"https://crt.sh/?q=%.{domain}&output=json"
+    stealth = get_stealth_engine(logger)
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "ARDF/2.0"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data  = json.loads(resp.read())
+        status, headers, content = stealth.get(url)
+        if status != 200:
+            return []
+        data = json.loads(content)
         names: Set[str] = set()
         for entry in data:
             for name in entry.get("name_value", "").splitlines():
@@ -414,13 +377,12 @@ def _fetch_securitytrails(domain: str, logger: ARDFLogger) -> List[str]:
     if not SECURITYTRAILS_KEY:
         return []
     url = f"https://api.securitytrails.com/v1/domain/{domain}/subdomains"
+    stealth = get_stealth_engine(logger)
     try:
-        req = urllib.request.Request(
-            url,
-            headers={"APIKEY": SECURITYTRAILS_KEY, "Accept": "application/json"},
-        )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            data = json.loads(resp.read())
+        status, headers, content = stealth.get(url, headers={"APIKEY": SECURITYTRAILS_KEY})
+        if status != 200:
+            return []
+        data = json.loads(content)
         subs = [f"{s}.{domain}" for s in data.get("subdomains", [])]
         logger.success(f"SecurityTrails → {len(subs)} subdomains")
         return subs
@@ -433,14 +395,13 @@ def _fetch_c99(domain: str, logger: ARDFLogger) -> List[str]:
     if not C99_KEY:
         return []
     url = f"https://api.c99.nl/subdomainfinder?key={C99_KEY}&domain={domain}&json"
+    stealth = get_stealth_engine(logger)
     try:
-        with urllib.request.urlopen(url, timeout=15) as resp:
-            data = json.loads(resp.read())
-        subs = [
-            s.get("subdomain", "")
-            for s in data.get("subdomains", [])
-            if s.get("subdomain")
-        ]
+        status, headers, content = stealth.get(url)
+        if status != 200:
+            return []
+        data = json.loads(content)
+        subs = [s.get("subdomain", "") for s in data.get("subdomains", []) if s.get("subdomain")]
         logger.success(f"c99.nl → {len(subs)} subdomains")
         return subs
     except Exception as e:
@@ -449,7 +410,7 @@ def _fetch_c99(domain: str, logger: ARDFLogger) -> List[str]:
 
 
 # ─────────────────────────────────────────────────────────────
-# Output parsers
+# Output parsers (unchanged)
 # ─────────────────────────────────────────────────────────────
 
 def _parse_nmap_xml(xml_path: Path, logger: ARDFLogger) -> List[Dict]:
@@ -462,19 +423,19 @@ def _parse_nmap_xml(xml_path: Path, logger: ARDFLogger) -> List[Dict]:
             addr_el = host_el.find("address")
             if addr_el is None:
                 continue
-            ip         = addr_el.get("addr", "")
+            ip = addr_el.get("addr", "")
             ports_data = []
             for port_el in host_el.findall(".//port"):
-                state_el   = port_el.find("state")
+                state_el = port_el.find("state")
                 service_el = port_el.find("service")
                 if state_el is None or state_el.get("state") != "open":
                     continue
                 ports_data.append({
-                    "port":     int(port_el.get("portid", 0)),
+                    "port": int(port_el.get("portid", 0)),
                     "protocol": port_el.get("protocol", "tcp"),
-                    "service":  service_el.get("name", "")    if service_el is not None else "",
-                    "product":  service_el.get("product", "") if service_el is not None else "",
-                    "version":  service_el.get("version", "") if service_el is not None else "",
+                    "service": service_el.get("name", "") if service_el is not None else "",
+                    "product": service_el.get("product", "") if service_el is not None else "",
+                    "version": service_el.get("version", "") if service_el is not None else "",
                 })
             if ports_data:
                 hosts.append({"ip": ip, "ports": ports_data})
@@ -498,57 +459,58 @@ def _parse_nuclei_jsonl(path: Path, logger: ARDFLogger) -> List[Dict]:
 def _nuclei_sev(s: str) -> SeverityLevel:
     return {
         "critical": SeverityLevel.CRITICAL,
-        "high":     SeverityLevel.HIGH,
-        "medium":   SeverityLevel.MEDIUM,
-        "low":      SeverityLevel.LOW,
+        "high": SeverityLevel.HIGH,
+        "medium": SeverityLevel.MEDIUM,
+        "low": SeverityLevel.LOW,
     }.get(s.lower(), SeverityLevel.INFO)
 
 
 # ─────────────────────────────────────────────────────────────
-# PASSIVE recon (ENHANCED with Cloudflare + Deep OSINT)
+# PASSIVE recon (enhanced with stealth + new modules)
 # ─────────────────────────────────────────────────────────────
 
 def _passive(
     target: str,
     session: Session,
-    logger:  ARDFLogger,
-    avail:   List[str],
+    logger: ARDFLogger,
+    avail: List[str],
 ) -> Dict:
-    out   = session.dir("recon") / "passive"
+    out = session.dir("recon") / "passive"
     out.mkdir(parents=True, exist_ok=True)
-    subs:   Set[str] = set()
-    urls:   Set[str] = set()
+    subs: Set[str] = set()
+    urls: Set[str] = set()
     emails: Set[str] = set()
 
-    # ── ENHANCED: Cloudflare detection ──────────────────────
+    stealth = get_stealth_engine(logger)
+    stealth.config.scan_mode = ScanMode.PASSIVE
+
+    # ── Cloudflare detection ──────────────────────────────
     cf_result = _detect_cloudflare(target, logger)
     if cf_result["detected"]:
         session.add_finding(Finding(
-            source      = "recon.passive",
-            title       = f"Cloudflare detected on {target}",
-            description = f"Version: {cf_result.get('version', 'unknown')}",
-            severity    = SeverityLevel.INFO,
-            host        = target,
-            tags        = ["cloudflare", "waf", "cdn"],
-            evidence    = json.dumps(cf_result),
-            remediation = "Consider bypass techniques: dns_history, ssl_cert, subdomain_enum, mx_record, worker_exploit"
+            source="recon.passive",
+            title=f"Cloudflare detected on {target}",
+            description=f"Version: {cf_result.get('version', 'unknown')}",
+            severity=SeverityLevel.INFO,
+            host=target,
+            tags=["cloudflare", "waf", "cdn"],
+            evidence=json.dumps(cf_result),
+            remediation="Consider bypass techniques: dns_history, ssl_cert, subdomain_enum, mx_record, worker_exploit"
         ))
-        
-        # Try to find origin
+
         origin_candidates = _find_origin_candidates(target, logger)
         if origin_candidates:
             session.add_finding(Finding(
-                source      = "recon.passive",
-                title       = f"Origin server candidates found for {target}",
-                description = f"Candidates: {', '.join(origin_candidates[:5])}",
-                severity    = SeverityLevel.HIGH,
-                host        = target,
-                tags        = ["cloudflare", "origin", "bypass"],
-                evidence    = json.dumps(origin_candidates[:10]),
-                remediation = "Directly attack origin IPs to bypass Cloudflare"
+                source="recon.passive",
+                title=f"Origin server candidates found for {target}",
+                description=f"Candidates: {', '.join(origin_candidates[:5])}",
+                severity=SeverityLevel.HIGH,
+                host=target,
+                tags=["cloudflare", "origin", "bypass"],
+                evidence=json.dumps(origin_candidates[:10]),
+                remediation="Directly attack origin IPs to bypass Cloudflare"
             ))
-            logger.success(f"Found {len(origin_candidates)} origin candidates")
-    
+
     # ── Subdomain enumeration ──────────────────────────────
     if "subfinder" in avail:
         logger.info("subfinder...")
@@ -631,15 +593,14 @@ def _passive(
                     h = rec.get("name", "")
                     if h and h.endswith(target):
                         subs.add(h.rstrip("."))
-                    if (rec.get("type") == "info" and
-                            "zone transfer" in rec.get("name", "").lower()):
+                    if (rec.get("type") == "info" and "zone transfer" in rec.get("name", "").lower()):
                         session.add_finding(Finding(
-                            source      = "recon.passive",
-                            title       = f"DNS zone transfer possible on {target}",
-                            severity    = SeverityLevel.HIGH,
-                            host        = target,
-                            tags        = ["dns", "zone-transfer", "dnsrecon"],
-                            remediation = "Restrict zone transfers to authorised secondaries only",
+                            source="recon.passive",
+                            title=f"DNS zone transfer possible on {target}",
+                            severity=SeverityLevel.HIGH,
+                            host=target,
+                            tags=["dns", "zone-transfer", "dnsrecon"],
+                            remediation="Restrict zone transfers to authorised secondaries only",
                         ))
             except Exception:
                 pass
@@ -667,8 +628,7 @@ def _passive(
         logger.info("dnstwist typosquatting...")
         twist_json = out / "dnstwist.json"
         _run(
-            ["dnstwist", "--registered", "--format", "json", "--output",
-             str(twist_json), target],
+            ["dnstwist", "--registered", "--format", "json", "--output", str(twist_json), target],
             logger, 120,
         )
         if twist_json.exists():
@@ -676,13 +636,13 @@ def _passive(
                 for entry in json.loads(twist_json.read_text()):
                     if entry.get("dns-a"):
                         session.add_finding(Finding(
-                            source      = "recon.passive",
-                            title       = f"Typosquat domain registered: {entry.get('domain','')}",
-                            description = f"IP: {entry.get('dns-a',[''])[0]}",
-                            severity    = SeverityLevel.MEDIUM,
-                            host        = target,
-                            tags        = ["typosquat", "phishing", "dnstwist"],
-                            evidence    = json.dumps(entry),
+                            source="recon.passive",
+                            title=f"Typosquat domain registered: {entry.get('domain','')}",
+                            description=f"IP: {entry.get('dns-a',[''])[0]}",
+                            severity=SeverityLevel.MEDIUM,
+                            host=target,
+                            tags=["typosquat", "phishing", "dnstwist"],
+                            evidence=json.dumps(entry),
                         ))
             except Exception:
                 pass
@@ -695,12 +655,12 @@ def _passive(
             _write(stdout, f"holehe_{_safe(email)}", out)
             if "gmail" in stdout.lower() or "outlook" in stdout.lower():
                 session.add_finding(Finding(
-                    source   = "recon.passive",
-                    title    = f"Email associated with service: {email}",
-                    severity = SeverityLevel.LOW,
-                    host     = target,
-                    tags     = ["email", "holehe", "osint"],
-                    evidence = email,
+                    source="recon.passive",
+                    title=f"Email associated with service: {email}",
+                    severity=SeverityLevel.LOW,
+                    host=target,
+                    tags=["email", "holehe", "osint"],
+                    evidence=email,
                 ))
 
     if "sherlock" in avail:
@@ -710,69 +670,61 @@ def _passive(
             if "found" in stdout.lower():
                 _write(stdout, f"sherlock_{username}", out)
                 session.add_finding(Finding(
-                    source   = "recon.passive",
-                    title    = f"Social media presence: {username}",
-                    severity = SeverityLevel.INFO,
-                    host     = target,
-                    tags     = ["sherlock", "social", "osint"],
-                    evidence = stdout[:500],
+                    source="recon.passive",
+                    title=f"Social media presence: {username}",
+                    severity=SeverityLevel.INFO,
+                    host=target,
+                    tags=["sherlock", "social", "osint"],
+                    evidence=stdout[:500],
                 ))
 
     # ── Code leaks ──────────────────────────────────────────
     if "gitdorker" in avail:
         logger.info("gitdorker code leak search...")
         git_out = out / "gitdorker.txt"
-        _run(
-            ["gitdorker", "-d", target, "-o", str(git_out)],
-            logger, 120,
-        )
+        _run(["gitdorker", "-d", target, "-o", str(git_out)], logger, 120)
         for l in _read_lines(git_out):
-            if "key" in l.lower() or "secret" in l.lower() or "token" in l.lower():
+            if any(k in l.lower() for k in ["key", "secret", "token"]):
                 session.add_finding(Finding(
-                    source      = "recon.passive",
-                    title       = "Potential code leak on GitHub",
-                    description = l.strip()[:200],
-                    severity    = SeverityLevel.HIGH,
-                    host        = target,
-                    tags        = ["github", "code-leak", "gitdorker"],
-                    evidence    = l.strip(),
-                    remediation = "Rotate exposed keys/tokens immediately"
+                    source="recon.passive",
+                    title="Potential code leak on GitHub",
+                    description=l.strip()[:200],
+                    severity=SeverityLevel.HIGH,
+                    host=target,
+                    tags=["github", "code-leak", "gitdorker"],
+                    evidence=l.strip(),
+                    remediation="Rotate exposed keys/tokens immediately"
                 ))
 
     # ── Save results ────────────────────────────────────────
-    subs_list   = sorted(subs)
-    urls_list   = sorted(urls)
+    subs_list = sorted(subs)
+    urls_list = sorted(urls)
     emails_list = sorted(emails)
-    _write("\n".join(subs_list),   "subdomains", out)
-    _write("\n".join(urls_list),   "urls",       out)
-    _write("\n".join(emails_list), "emails",     out)
+    _write("\n".join(subs_list), "subdomains", out)
+    _write("\n".join(urls_list), "urls", out)
+    _write("\n".join(emails_list), "emails", out)
 
     for sub in subs_list:
         session.add_finding(Finding(
-            source      = "recon.passive",
-            title       = "Subdomain discovered",
-            description = f"{sub} found for {target}",
-            severity    = SeverityLevel.INFO,
-            host        = sub,
-            tags        = ["subdomain", "passive"],
+            source="recon.passive",
+            title="Subdomain discovered",
+            description=f"{sub} found for {target}",
+            severity=SeverityLevel.INFO,
+            host=sub,
+            tags=["subdomain", "passive"],
         ))
     for email in emails_list:
         session.add_finding(Finding(
-            source   = "recon.passive",
-            title    = "Email address harvested",
-            severity = SeverityLevel.LOW,
-            host     = target,
-            tags     = ["email", "osint"],
-            evidence = email,
+            source="recon.passive",
+            title="Email address harvested",
+            severity=SeverityLevel.LOW,
+            host=target,
+            tags=["email", "osint"],
+            evidence=email,
         ))
 
-    logger.success(
-        f"Passive done | subs={len(subs_list)} "
-        f"urls={len(urls_list)} emails={len(emails_list)} "
-        f"cloudflare={cf_result['detected']}"
-    )
-    
-    # Return enhanced results
+    logger.success(f"Passive done | subs={len(subs_list)} urls={len(urls_list)} emails={len(emails_list)} cloudflare={cf_result['detected']}")
+
     results = {
         "subdomains": subs_list,
         "urls": urls_list,
@@ -784,27 +736,29 @@ def _passive(
 
 
 # ─────────────────────────────────────────────────────────────
-# NORMAL recon (ENHANCED: Cloudflare-aware scanning)
+# NORMAL recon (enhanced with stealth)
 # ─────────────────────────────────────────────────────────────
 
 def _normal(
-    target:  str,
+    target: str,
     session: Session,
-    logger:  ARDFLogger,
-    avail:   List[str],
+    logger: ARDFLogger,
+    avail: List[str],
 ) -> Dict:
     out = session.dir("recon") / "normal"
     out.mkdir(parents=True, exist_ok=True)
-    results   = _passive(target, session, logger, avail)
+    results = _passive(target, session, logger, avail)
     all_hosts = list(set([target] + results["subdomains"]))
     hosts_file = out / "all_hosts.txt"
     hosts_file.write_text("\n".join(all_hosts))
     live_urls: List[str] = []
 
-    # ── Check if Cloudflare is detected ──────────────────────
+    stealth = get_stealth_engine(logger)
+    stealth.config.scan_mode = ScanMode.LOW
+
     is_cf = results.get("cloudflare", {}).get("detected", False)
     origin_candidates = results.get("origin_candidates", [])
-    
+
     if is_cf and origin_candidates:
         logger.info(f"Cloudflare detected. Will also scan origin candidates: {origin_candidates[:3]}")
         all_hosts = all_hosts + [ip for ip in origin_candidates if ip not in all_hosts]
@@ -815,41 +769,37 @@ def _normal(
         logger.info("puredns subdomain bruteforce...")
         puredns_out = out / "puredns_subs.txt"
         _run(
-            ["puredns", "bruteforce", wl_subs, target,
-             "-r", "/etc/resolv.conf", "-w", str(puredns_out)],
+            ["puredns", "bruteforce", wl_subs, target, "-r", "/etc/resolv.conf", "-w", str(puredns_out)],
             logger, 900,
         )
         for h in _read_lines(puredns_out):
             if h not in results["subdomains"]:
                 results["subdomains"].append(h)
                 session.add_finding(Finding(
-                    source   = "recon.normal",
-                    title    = "Subdomain brute-forced",
-                    severity = SeverityLevel.INFO,
-                    host     = h,
-                    tags     = ["subdomain", "bruteforce", "puredns"],
+                    source="recon.normal",
+                    title="Subdomain brute-forced",
+                    severity=SeverityLevel.INFO,
+                    host=h,
+                    tags=["subdomain", "bruteforce", "puredns"],
                 ))
 
     # ── dnsx expanded record types ───────────────────────────
     if "dnsx" in avail:
         logger.info("dnsx MX/TXT/CNAME/NS/AAAA records...")
         for rtype in ("mx", "txt", "cname", "ns", "aaaa"):
-            stdout, _ = _run(
-                ["dnsx", "-d", target, f"-{rtype}", "-silent", "-resp"],
-                logger, 60,
-            )
+            stdout, _ = _run(["dnsx", "-d", target, f"-{rtype}", "-silent", "-resp"], logger, 60)
             if stdout.strip():
                 _write(stdout, f"dnsx_{rtype}", out)
                 if rtype == "txt":
                     for l in stdout.splitlines():
                         if any(k in l.lower() for k in ("spf", "dkim", "dmarc")):
                             session.add_finding(Finding(
-                                source   = "recon.normal",
-                                title    = f"Email security record: {l.strip()[:80]}",
-                                severity = SeverityLevel.INFO,
-                                host     = target,
-                                tags     = ["dns", "email-security"],
-                                evidence = l.strip(),
+                                source="recon.normal",
+                                title=f"Email security record: {l.strip()[:80]}",
+                                severity=SeverityLevel.INFO,
+                                host=target,
+                                tags=["dns", "email-security"],
+                                evidence=l.strip(),
                             ))
 
     # ── tlsx TLS cert enum ──────────────────────────────────
@@ -857,8 +807,7 @@ def _normal(
         logger.info("tlsx TLS certificate enumeration...")
         tlsx_out = out / "tlsx.jsonl"
         _run(
-            ["tlsx", "-l", str(hosts_file), "-san", "-cn",
-             "-json", "-o", str(tlsx_out), "-silent"],
+            ["tlsx", "-l", str(hosts_file), "-san", "-cn", "-json", "-o", str(tlsx_out), "-silent"],
             logger, 300,
         )
         for line in _read_lines(tlsx_out):
@@ -869,11 +818,11 @@ def _normal(
                     if name.endswith(target) and name not in results["subdomains"]:
                         results["subdomains"].append(name)
                         session.add_finding(Finding(
-                            source   = "recon.normal",
-                            title    = f"TLS SAN subdomain: {name}",
-                            severity = SeverityLevel.INFO,
-                            host     = name,
-                            tags     = ["tls", "san", "tlsx"],
+                            source="recon.normal",
+                            title=f"TLS SAN subdomain: {name}",
+                            severity=SeverityLevel.INFO,
+                            host=name,
+                            tags=["tls", "san", "tlsx"],
                         ))
             except Exception:
                 pass
@@ -882,6 +831,7 @@ def _normal(
     if "httpx" in avail:
         logger.info("httpx probe...")
         httpx_json = out / "httpx.jsonl"
+        # Apply stealth: add delay flag
         _run(
             ["httpx", "-l", str(hosts_file), "-silent", "-json",
              "-status-code", "-title", "-tech-detect", "-favicon",
@@ -890,29 +840,28 @@ def _normal(
         )
         for line in _read_lines(httpx_json):
             try:
-                d   = json.loads(line)
+                d = json.loads(line)
                 url = d.get("url", "")
                 if url:
                     live_urls.append(url)
                 for tech in d.get("tech", []):
                     session.add_finding(Finding(
-                        source   = "recon.normal",
-                        title    = f"Technology fingerprint: {tech}",
-                        severity = SeverityLevel.INFO,
-                        host     = d.get("host", target),
-                        tags     = ["tech", "httpx"],
-                        evidence = url,
+                        source="recon.normal",
+                        title=f"Technology fingerprint: {tech}",
+                        severity=SeverityLevel.INFO,
+                        host=d.get("host", target),
+                        tags=["tech", "httpx"],
+                        evidence=url,
                     ))
-                # Detect if origin was found via httpx
                 if d.get("host") in origin_candidates:
                     session.add_finding(Finding(
-                        source      = "recon.normal",
-                        title       = f"Cloudflare origin server responding: {d.get('host')}",
-                        severity    = SeverityLevel.HIGH,
-                        host        = d.get("host", ""),
-                        tags        = ["cloudflare", "origin", "bypass"],
-                        evidence    = url,
-                        remediation = "This IP can be attacked directly, bypassing Cloudflare"
+                        source="recon.normal",
+                        title=f"Cloudflare origin server responding: {d.get('host')}",
+                        severity=SeverityLevel.HIGH,
+                        host=d.get("host", ""),
+                        tags=["cloudflare", "origin", "bypass"],
+                        evidence=url,
+                        remediation="This IP can be attacked directly, bypassing Cloudflare"
                     ))
             except Exception:
                 pass
@@ -932,33 +881,28 @@ def _normal(
                  "-iL", str(ips_file), "-oX", str(nmap_xml), "-T4"],
                 logger, 1800,
             )
-            risky = {"telnet","ftp","rsh","rexec","rlogin","vnc","rdp","smb","netbios"}
+            risky = {"telnet", "ftp", "rsh", "rexec", "rlogin", "vnc", "rdp", "smb", "netbios"}
             for host_data in _parse_nmap_xml(nmap_xml, logger):
                 for p in host_data["ports"]:
-                    sev = (SeverityLevel.MEDIUM
-                           if p["service"].lower() in risky
-                           else SeverityLevel.INFO)
+                    sev = SeverityLevel.MEDIUM if p["service"].lower() in risky else SeverityLevel.INFO
                     session.add_finding(Finding(
-                        source      = "recon.normal",
-                        title       = f"Port {p['port']}/{p['protocol']} open ({p['service']})",
-                        description = f"product={p['product']} version={p['version']}",
-                        severity    = sev,
-                        host        = host_data["ip"],
-                        port        = p["port"],
-                        tags        = ["port", "nmap"],
+                        source="recon.normal",
+                        title=f"Port {p['port']}/{p['protocol']} open ({p['service']})",
+                        description=f"product={p['product']} version={p['version']}",
+                        severity=sev,
+                        host=host_data["ip"],
+                        port=p["port"],
+                        tags=["port", "nmap"],
                     ))
             results["nmap_hosts"] = _parse_nmap_xml(nmap_xml, logger)
 
     # ── whatweb ─────────────────────────────────────────────
     if "whatweb" in avail and live_urls:
         logger.info("whatweb tech fingerprint...")
-        stdout, _ = _run(
-            ["whatweb", "--log-json=-", "--quiet"] + live_urls[:20],
-            logger, 300,
-        )
+        stdout, _ = _run(["whatweb", "--log-json=-", "--quiet"] + live_urls[:20], logger, 300)
         _write(stdout, "whatweb", out)
 
-    # ── wafw00f (WAF detection) ────────────────────────────
+    # ── wafw00f ─────────────────────────────────────────────
     if "wafw00f" in avail and live_urls:
         logger.info("wafw00f WAF detection...")
         stdout, _ = _run(["wafw00f", "-a", live_urls[0]], logger, 60)
@@ -967,25 +911,21 @@ def _normal(
             if "is behind" in l.lower():
                 waf_type = l.strip().split("is behind")[-1].strip()
                 session.add_finding(Finding(
-                    source      = "recon.normal",
-                    title       = f"WAF detected: {waf_type[:60]}",
-                    severity    = SeverityLevel.LOW,
-                    host        = target,
-                    tags        = ["waf", "wafw00f", "fingerprint"],
-                    evidence    = l.strip(),
-                    remediation = f"Targeted WAF bypass may be required for {waf_type}"
+                    source="recon.normal",
+                    title=f"WAF detected: {waf_type[:60]}",
+                    severity=SeverityLevel.LOW,
+                    host=target,
+                    tags=["waf", "wafw00f", "fingerprint"],
+                    evidence=l.strip(),
+                    remediation=f"Targeted WAF bypass may be required for {waf_type}"
                 ))
-                # If this is Cloudflare, we already have it
-                if "cloudflare" in waf_type.lower():
-                    logger.success("Cloudflare confirmed by wafw00f")
 
     # ── nikto ───────────────────────────────────────────────
     if "nikto" in avail and live_urls:
         logger.info("nikto web scan...")
         nikto_json = out / "nikto.json"
         _run(
-            ["nikto", "-h", live_urls[0], "-Format", "json",
-             "-o", str(nikto_json), "-nointeractive"],
+            ["nikto", "-h", live_urls[0], "-Format", "json", "-o", str(nikto_json), "-nointeractive"],
             logger, 600,
         )
         if nikto_json.exists():
@@ -993,18 +933,18 @@ def _normal(
                 data = json.loads(nikto_json.read_text())
                 for vuln in data.get("vulnerabilities", []):
                     session.add_finding(Finding(
-                        source      = "recon.normal",
-                        title       = f"Nikto: {vuln.get('id','?')}",
-                        description = vuln.get("msg", ""),
-                        severity    = SeverityLevel.MEDIUM,
-                        host        = target,
-                        tags        = ["nikto", "web"],
-                        evidence    = json.dumps(vuln),
+                        source="recon.normal",
+                        title=f"Nikto: {vuln.get('id','?')}",
+                        description=vuln.get("msg", ""),
+                        severity=SeverityLevel.MEDIUM,
+                        host=target,
+                        tags=["nikto", "web"],
+                        evidence=json.dumps(vuln),
                     ))
             except Exception:
                 pass
 
-    # ── Cloud-specific enumeration ─────────────────────────
+    # ── Cloud enumeration ──────────────────────────────────
     if "s3scanner" in avail:
         logger.info("s3scanner cloud bucket enum...")
         stdout, _ = _run(["s3scanner", "scan", "--domain", target], logger, 120)
@@ -1012,13 +952,13 @@ def _normal(
         for l in stdout.splitlines():
             if "exists" in l.lower() or "open" in l.lower():
                 session.add_finding(Finding(
-                    source      = "recon.normal",
-                    title       = f"Cloud bucket exposed: {l.strip()[:80]}",
-                    severity    = SeverityLevel.HIGH,
-                    host        = target,
-                    tags        = ["cloud", "s3", "misconfiguration"],
-                    evidence    = l.strip(),
-                    remediation = "Set bucket ACLs to private and enable access logging",
+                    source="recon.normal",
+                    title=f"Cloud bucket exposed: {l.strip()[:80]}",
+                    severity=SeverityLevel.HIGH,
+                    host=target,
+                    tags=["cloud", "s3", "misconfiguration"],
+                    evidence=l.strip(),
+                    remediation="Set bucket ACLs to private and enable access logging",
                 ))
 
     if "cloud_enum" in avail:
@@ -1028,12 +968,12 @@ def _normal(
         for l in _read_lines(cloud_out):
             if "public" in l.lower() or "open" in l.lower():
                 session.add_finding(Finding(
-                    source      = "recon.normal",
-                    title       = "Cloud resource exposure detected",
-                    severity    = SeverityLevel.MEDIUM,
-                    host        = target,
-                    tags        = ["cloud", "enum", "azure", "aws", "gcp"],
-                    evidence    = l.strip(),
+                    source="recon.normal",
+                    title="Cloud resource exposure detected",
+                    severity=SeverityLevel.MEDIUM,
+                    host=target,
+                    tags=["cloud", "enum", "azure", "aws", "gcp"],
+                    evidence=l.strip(),
                 ))
 
     results["live_urls"] = live_urls
@@ -1042,55 +982,48 @@ def _normal(
 
 
 # ─────────────────────────────────────────────────────────────
-# DEPTH recon (Enhanced with Cloudflare bypass testing)
+# DEPTH recon (enhanced with stealth + new modules)
 # ─────────────────────────────────────────────────────────────
 
 def _depth(
-    target:  str,
+    target: str,
     session: Session,
-    logger:  ARDFLogger,
-    avail:   List[str],
+    logger: ARDFLogger,
+    avail: List[str],
 ) -> Dict:
     out = session.dir("recon") / "depth"
     out.mkdir(parents=True, exist_ok=True)
-    results   = _normal(target, session, logger, avail)
+    results = _normal(target, session, logger, avail)
     all_hosts = list(set([target] + results.get("subdomains", [])))
     live_urls = results.get("live_urls", [])
-    
-    # ── Get Cloudflare status from previous phases ──────────
+
+    stealth = get_stealth_engine(logger)
+    stealth.config.scan_mode = ScanMode.MEDIUM
+
     is_cf = results.get("cloudflare", {}).get("detected", False)
     origin_candidates = results.get("origin_candidates", [])
-    
-    # ── If Cloudflare detected, test bypass techniques ──────
+
+    # ── Test Cloudflare bypass ──────────────────────────────
     if is_cf and origin_candidates:
         logger.info("Testing Cloudflare bypass on origin candidates...")
         for ip in origin_candidates[:5]:
-            # Test if origin responds to direct requests
             try:
                 test_url = f"https://{ip}"
-                req = urllib.request.Request(
-                    test_url,
-                    headers={
-                        "Host": target,
-                        "User-Agent": "ARDF/2.0"
-                    }
-                )
-                with urllib.request.urlopen(req, timeout=10) as resp:
-                    if resp.status == 200:
-                        session.add_finding(Finding(
-                            source      = "recon.depth",
-                            title       = f"Cloudflare bypass confirmed via origin IP: {ip}",
-                            description = f"Direct connection to origin succeeded with Host header",
-                            severity    = SeverityLevel.CRITICAL,
-                            host        = ip,
-                            tags        = ["cloudflare", "bypass", "origin", "direct-hit"],
-                            evidence    = test_url,
-                            remediation = "The origin server is directly accessible. This is a critical misconfiguration."
-                        ))
-                        logger.success(f"Confirmed origin access via {ip}")
-                        # Add to live hosts for further scanning
-                        if ip not in all_hosts:
-                            all_hosts.append(ip)
+                status, headers, content = stealth.get(test_url, headers={"Host": target})
+                if status == 200:
+                    session.add_finding(Finding(
+                        source="recon.depth",
+                        title=f"Cloudflare bypass confirmed via origin IP: {ip}",
+                        description="Direct connection to origin succeeded with Host header",
+                        severity=SeverityLevel.CRITICAL,
+                        host=ip,
+                        tags=["cloudflare", "bypass", "origin", "direct-hit"],
+                        evidence=test_url,
+                        remediation="The origin server is directly accessible. This is a critical misconfiguration."
+                    ))
+                    logger.success(f"Confirmed origin access via {ip}")
+                    if ip not in all_hosts:
+                        all_hosts.append(ip)
             except Exception:
                 pass
 
@@ -1099,12 +1032,11 @@ def _depth(
         logger.info("masscan all 65535 ports...")
         ips = _resolve(all_hosts, logger)
         if ips:
-            ips_f        = out / "depth_ips.txt"
+            ips_f = out / "depth_ips.txt"
             masscan_json = out / "masscan.json"
             ips_f.write_text("\n".join(ips))
             _run(
-                ["masscan", "-p1-65535", "-iL", str(ips_f),
-                 "--rate=1000", "-oJ", str(masscan_json)],
+                ["masscan", "-p1-65535", "-iL", str(ips_f), "--rate=1000", "-oJ", str(masscan_json)],
                 logger, 3600,
             )
             if masscan_json.exists():
@@ -1113,12 +1045,12 @@ def _depth(
                         ip = entry.get("ip", "")
                         for p in entry.get("ports", []):
                             session.add_finding(Finding(
-                                source   = "recon.depth",
-                                title    = f"masscan: port {p['port']}/{p['proto']}",
-                                severity = SeverityLevel.INFO,
-                                host     = ip,
-                                port     = p["port"],
-                                tags     = ["masscan", "port"],
+                                source="recon.depth",
+                                title=f"masscan: port {p['port']}/{p['proto']}",
+                                severity=SeverityLevel.INFO,
+                                host=ip,
+                                port=p["port"],
+                                tags=["masscan", "port"],
                             ))
                 except Exception:
                     pass
@@ -1128,40 +1060,37 @@ def _depth(
         logger.info("nmap full service scan...")
         ips = _resolve(all_hosts, logger)
         if ips:
-            ips_f    = out / "depth_ips_nmap.txt"
+            ips_f = out / "depth_ips_nmap.txt"
             nmap_xml = out / "nmap_depth.xml"
             ips_f.write_text("\n".join(ips))
             _run(
-                ["nmap", "-sV", "-sC", "-p-", "--open",
-                 "-iL", str(ips_f), "-oX", str(nmap_xml), "-T4"],
+                ["nmap", "-sV", "-sC", "-p-", "--open", "-iL", str(ips_f), "-oX", str(nmap_xml), "-T4"],
                 logger, 7200,
             )
             for host_data in _parse_nmap_xml(nmap_xml, logger):
                 for p in host_data["ports"]:
-                    # Check if this is origin server
                     is_origin = host_data["ip"] in origin_candidates
                     severity = SeverityLevel.HIGH if is_origin and p["port"] in [80, 443, 22, 3389] else SeverityLevel.INFO
                     session.add_finding(Finding(
-                        source      = "recon.depth",
-                        title       = f"Full scan: port {p['port']} ({p['service']})",
-                        description = f"product={p['product']} version={p['version']}" + 
-                                     (f" [ORIGIN SERVER]" if is_origin else ""),
-                        severity    = severity,
-                        host        = host_data["ip"],
-                        port        = p["port"],
-                        tags        = ["nmap", "full-scan"] + (["origin", "cloudflare-bypass"] if is_origin else []),
+                        source="recon.depth",
+                        title=f"Full scan: port {p['port']} ({p['service']})",
+                        description=f"product={p['product']} version={p['version']}" +
+                                    (f" [ORIGIN SERVER]" if is_origin else ""),
+                        severity=severity,
+                        host=host_data["ip"],
+                        port=p["port"],
+                        tags=["nmap", "full-scan"] + (["origin", "cloudflare-bypass"] if is_origin else []),
                     ))
 
     # ── nuclei full template scan ──────────────────────────
     if "nuclei" in avail and live_urls:
         logger.info("nuclei full template scan...")
-        urls_f       = out / "live_urls.txt"
+        urls_f = out / "live_urls.txt"
         nuclei_jsonl = out / "nuclei.jsonl"
         urls_f.write_text("\n".join(live_urls))
         _run(
             ["nuclei", "-l", str(urls_f), "-json-export", str(nuclei_jsonl),
-             "-silent", "-severity", NUCLEI_SEVERITY,
-             "-tags", NUCLEI_TAGS_DEEP, "-retries", "2"],
+             "-silent", "-severity", NUCLEI_SEVERITY, "-tags", NUCLEI_TAGS_DEEP, "-retries", "2"],
             logger, 7200,
         )
         for hit in _parse_nuclei_jsonl(nuclei_jsonl, logger):
@@ -1169,18 +1098,18 @@ def _depth(
             cve = None
             if hit.get("info", {}).get("classification"):
                 cve_list = hit["info"]["classification"].get("cve-id", [])
-                cve      = cve_list[0] if cve_list else None
+                cve = cve_list[0] if cve_list else None
             session.add_finding(Finding(
-                source      = "recon.depth",
-                title       = hit.get("info", {}).get("name", "Nuclei finding"),
-                description = hit.get("info", {}).get("description", ""),
-                severity    = sev,
-                host        = hit.get("host", target),
-                cve         = cve,
-                tags        = ["nuclei"] + hit.get("info", {}).get("tags", []),
-                evidence    = hit.get("matched-at", ""),
-                remediation = hit.get("info", {}).get("remediation", ""),
-                raw         = hit,
+                source="recon.depth",
+                title=hit.get("info", {}).get("name", "Nuclei finding"),
+                description=hit.get("info", {}).get("description", ""),
+                severity=sev,
+                host=hit.get("host", target),
+                cve=cve,
+                tags=["nuclei"] + hit.get("info", {}).get("tags", []),
+                evidence=hit.get("matched-at", ""),
+                remediation=hit.get("info", {}).get("remediation", ""),
+                raw=hit,
             ))
 
     # ── ffuf directory fuzzing ─────────────────────────────
@@ -1201,12 +1130,12 @@ def _depth(
                     try:
                         for r in json.loads(ffuf_json.read_text()).get("results", []):
                             session.add_finding(Finding(
-                                source   = "recon.depth",
-                                title    = f"ffuf: /{r['input'].get('FUZZ','')}",
-                                severity = SeverityLevel.LOW,
-                                host     = target,
-                                tags     = ["ffuf", "directory"],
-                                evidence = r.get("url", ""),
+                                source="recon.depth",
+                                title=f"ffuf: /{r['input'].get('FUZZ','')}",
+                                severity=SeverityLevel.LOW,
+                                host=target,
+                                tags=["ffuf", "directory"],
+                                evidence=r.get("url", ""),
                             ))
                     except Exception:
                         pass
@@ -1216,65 +1145,49 @@ def _depth(
         logger.info("gospider crawl...")
         spider_dir = out / "gospider"
         spider_dir.mkdir(exist_ok=True)
-        _run(
-            ["gospider", "-s", live_urls[0], "--json", "--quiet",
-             "-o", str(spider_dir), "-d", "3", "-c", "10"],
-            logger, 600,
-        )
+        _run(["gospider", "-s", live_urls[0], "--json", "--quiet", "-o", str(spider_dir), "-d", "3", "-c", "10"], logger, 600)
 
     if "katana" in avail and live_urls:
         logger.info("katana crawl...")
         katana_out = out / "katana.txt"
-        _run(
-            ["katana", "-u", live_urls[0], "-silent",
-             "-depth", "3", "-jc", "-o", str(katana_out)],
-            logger, 600,
-        )
+        _run(["katana", "-u", live_urls[0], "-silent", "-depth", "3", "-jc", "-o", str(katana_out)], logger, 600)
 
     # ── gf pattern matching ─────────────────────────────────
     if "gf" in avail:
         logger.info("gf pattern matching...")
         katana_out = out / "katana.txt"
         if katana_out.exists():
-            for pattern in ("xss", "sqli", "ssrf", "redirect",
-                            "lfi", "rce", "idor", "ssti"):
-                stdout, _ = _run(
-                    ["bash", "-c",
-                     f"cat {shlex.quote(str(katana_out))} | gf {pattern}"],
-                    logger, 60,
-                )
+            for pattern in ("xss", "sqli", "ssrf", "redirect", "lfi", "rce", "idor", "ssti"):
+                stdout, _ = _run(["bash", "-c", f"cat {shlex.quote(str(katana_out))} | gf {pattern}"], logger, 60)
                 if stdout.strip():
                     _write(stdout, f"gf_{pattern}", out)
                     for l in stdout.splitlines():
                         if l.strip():
                             session.add_finding(Finding(
-                                source   = "recon.depth",
-                                title    = f"gf pattern match: {pattern}",
-                                severity = SeverityLevel.MEDIUM,
-                                host     = target,
-                                tags     = ["gf", pattern],
-                                evidence = l.strip(),
+                                source="recon.depth",
+                                title=f"gf pattern match: {pattern}",
+                                severity=SeverityLevel.MEDIUM,
+                                host=target,
+                                tags=["gf", pattern],
+                                evidence=l.strip(),
                             ))
 
     # ── trufflehog secrets scan ────────────────────────────
     if "trufflehog" in avail:
         logger.info("trufflehog secret scan...")
         for js_file in out.rglob("*.js"):
-            stdout, _ = _run(
-                ["trufflehog", "filesystem", str(js_file), "--json"],
-                logger, 120,
-            )
+            stdout, _ = _run(["trufflehog", "filesystem", str(js_file), "--json"], logger, 120)
             for l in stdout.splitlines():
                 try:
                     d = json.loads(l)
                     session.add_finding(Finding(
-                        source      = "recon.depth",
-                        title       = f"Secret found: {d.get('DetectorName','?')}",
-                        description = f"Found in {js_file.name}",
-                        severity    = SeverityLevel.HIGH,
-                        host        = target,
-                        tags        = ["secret", "trufflehog"],
-                        evidence    = d.get("Raw", "")[:300],
+                        source="recon.depth",
+                        title=f"Secret found: {d.get('DetectorName','?')}",
+                        description=f"Found in {js_file.name}",
+                        severity=SeverityLevel.HIGH,
+                        host=target,
+                        tags=["secret", "trufflehog"],
+                        evidence=d.get("Raw", "")[:300],
                     ))
                 except Exception:
                     pass
@@ -1282,24 +1195,20 @@ def _depth(
     # ── subjack subdomain takeover ─────────────────────────
     if "subjack" in avail and results.get("subdomains"):
         logger.info("subjack subdomain takeover check...")
-        subs_f   = out / "subs_subjack.txt"
+        subs_f = out / "subs_subjack.txt"
         subj_out = out / "subjack_results.txt"
         subs_f.write_text("\n".join(results["subdomains"]))
-        _run(
-            ["subjack", "-w", str(subs_f), "-t", "50",
-             "-timeout", "30", "-o", str(subj_out), "-ssl"],
-            logger, 600,
-        )
+        _run(["subjack", "-w", str(subs_f), "-t", "50", "-timeout", "30", "-o", str(subj_out), "-ssl"], logger, 600)
         for l in _read_lines(subj_out):
             if l.strip():
                 session.add_finding(Finding(
-                    source      = "recon.depth",
-                    title       = "Subdomain takeover possible",
-                    severity    = SeverityLevel.HIGH,
-                    host        = target,
-                    tags        = ["takeover", "subjack"],
-                    evidence    = l.strip(),
-                    remediation = "Remove or update the dangling DNS CNAME record",
+                    source="recon.depth",
+                    title="Subdomain takeover possible",
+                    severity=SeverityLevel.HIGH,
+                    host=target,
+                    tags=["takeover", "subjack"],
+                    evidence=l.strip(),
+                    remediation="Remove or update the dangling DNS CNAME record",
                 ))
 
     # ── paramspider parameter mining ────────────────────────
@@ -1313,37 +1222,29 @@ def _depth(
     # ── gowitness screenshots ──────────────────────────────
     if "gowitness" in avail and live_urls:
         logger.info("gowitness screenshots...")
-        urls_f  = out / "live_urls.txt"
+        urls_f = out / "live_urls.txt"
         screens = out / "screenshots"
         screens.mkdir(exist_ok=True)
         urls_f.write_text("\n".join(live_urls[:50]))
-        _run(
-            ["gowitness", "file", "-f", str(urls_f),
-             "--screenshot-path", str(screens)],
-            logger, 600,
-        )
+        _run(["gowitness", "file", "-f", str(urls_f), "--screenshot-path", str(screens)], logger, 600)
 
     # ── wpscan ──────────────────────────────────────────────
     if "wpscan" in avail and live_urls:
         logger.info("wpscan WordPress scan...")
         for url in live_urls[:3]:
             wp_json = out / f"wpscan_{_safe(url)}.json"
-            _run(
-                ["wpscan", "--url", url, "-o", str(wp_json),
-                 "--format", "json", "--no-banner", "-e", "ap,at,u"],
-                logger, 600,
-            )
+            _run(["wpscan", "--url", url, "-o", str(wp_json), "--format", "json", "--no-banner", "-e", "ap,at,u"], logger, 600)
             if wp_json.exists():
                 try:
                     data = json.loads(wp_json.read_text())
                     for vuln in data.get("vulnerabilities", []):
                         session.add_finding(Finding(
-                            source   = "recon.depth",
-                            title    = f"WordPress vuln: {vuln.get('title','?')}",
-                            severity = SeverityLevel.HIGH,
-                            host     = target,
-                            tags     = ["wpscan", "wordpress"],
-                            evidence = json.dumps(vuln)[:300],
+                            source="recon.depth",
+                            title=f"WordPress vuln: {vuln.get('title','?')}",
+                            severity=SeverityLevel.HIGH,
+                            host=target,
+                            tags=["wpscan", "wordpress"],
+                            evidence=json.dumps(vuln)[:300],
                         ))
                 except Exception:
                     pass
@@ -1357,10 +1258,10 @@ def _depth(
 # ─────────────────────────────────────────────────────────────
 
 def run_recon(
-    target:  str,
-    depth:   str,
+    target: str,
+    depth: str,
     session: Session,
-    logger:  Optional[ARDFLogger] = None,
+    logger: Optional[ARDFLogger] = None,
 ) -> Dict[str, Any]:
     """
     Run reconnaissance against target at specified depth.
@@ -1381,16 +1282,10 @@ def run_recon(
         logger.error(f"Unknown depth: {depth}")
         return {}
 
-    logger.banner(
-        f"RECON [{depth.upper()}] → {target}",
-        style="bold green",
-    )
+    logger.banner(f"RECON [{depth.upper()}] → {target}", style="bold green")
 
-    avail   = _avail_for_depth(depth)
-    missing = [
-        t for t, depths in TOOL_DEPTHS.items()
-        if depth in depths and t not in avail
-    ]
+    avail = _avail_for_depth(depth)
+    missing = [t for t, depths in TOOL_DEPTHS.items() if depth in depths and t not in avail]
     if missing:
         logger.warning(f"Missing tools (skipped): {', '.join(missing)}")
     logger.info(f"Available tools: {', '.join(avail)}")
@@ -1407,7 +1302,6 @@ def run_recon(
             results = _depth(target, session, logger, avail)
     except Exception as e:
         logger.exception(f"Recon failed: {e}")
-        from modules.session import SessionStatus
         session.set_status(SessionStatus.FAILED)
         return {}
 
@@ -1423,9 +1317,5 @@ def run_recon(
             f, indent=2, default=str,
         )
 
-    logger.success(
-        f"Recon [{depth}] done | "
-        f"findings={session.meta.findings_count} "
-        f"risk={session.meta.risk_score}"
-    )
+    logger.success(f"Recon [{depth}] done | findings={session.meta.findings_count} risk={session.meta.risk_score}")
     return results
